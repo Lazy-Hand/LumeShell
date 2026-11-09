@@ -16,6 +16,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
+	"github.com/lobehub/lobe-mygo/pkg/theme"
 )
 
 // app is the state the window shows. Its view builds the interface from
@@ -98,8 +99,11 @@ func main() {
 	}
 }
 
-// view builds the page the hub shows.
-func (a *app) view(c *ui.Context) { a.hub.View(c) }
+// view builds the page the hub shows, in the Lobe UI theme.
+func (a *app) view(c *ui.Context) {
+	theme.Apply(c)
+	a.hub.View(c)
+}
 
 // connect starts a session with the profile and secret the list page
 // gave. The dial runs off the UI, and the terminal comes up when the

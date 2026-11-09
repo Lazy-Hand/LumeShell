@@ -4,6 +4,9 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
+	"github.com/lobehub/lobe-mygo/pkg/action"
+	"github.com/lobehub/lobe-mygo/pkg/lucide"
+	"github.com/lobehub/lobe-mygo/pkg/theme"
 	"lume/internal/filepanel"
 	"lume/internal/profiles"
 )
@@ -38,20 +41,23 @@ type TermPage struct {
 
 // View builds the page.
 func (p *TermPage) View(c *ui.Context) {
-	t := c.Theme()
+	tk := theme.TokensOf(c)
 	ui.Column(c).Fill().Children(func() {
-		ui.Row(c).Gap(10).Padding(10, 14).AlignItems(ui.Center).Background(t.Surface).Children(func() {
-			if ui.Button(c, "断开").Clicked() && p.Back != nil {
+		ui.Row(c).Gap(10).Padding(8, 14).AlignItems(ui.Center).Background(tk.BgContainer).Children(func() {
+			if action.Button(c, "断开", action.ButtonProps{Size: theme.Small}).Clicked() && p.Back != nil {
 				p.Back()
 			}
 			ui.Column(c).Gap(2).Grow(1).Children(func() {
 				ui.Text(c, p.Profile.Title()).Bold()
-				ui.Text(c, p.Profile.Endpoint()).FontSize(11).TextColor(t.TextMuted)
+				ui.Text(c, p.Profile.Endpoint()).FontSize(11).TextColor(tk.TextTertiary)
 			})
-			if ui.Button(c, "文件").Clicked() && p.ToFiles != nil {
+			if action.ActionIcon(c, lucide.FolderOpen(), action.ActionIconProps{
+				Title: "文件",
+			}).Clicked() && p.ToFiles != nil {
 				p.ToFiles()
 			}
 		})
+		ui.Divider(c)
 		terminal.View(c, p.Term).Fill().AutoFocus()
 	})
 }
@@ -73,17 +79,20 @@ type FilesPage struct {
 
 // View builds the page.
 func (p *FilesPage) View(c *ui.Context) {
-	t := c.Theme()
+	tk := theme.TokensOf(c)
 	ui.Column(c).Fill().Children(func() {
-		ui.Row(c).Gap(10).Padding(10, 14).AlignItems(ui.Center).Background(t.Surface).Children(func() {
-			if ui.Button(c, "返回").Clicked() && p.Back != nil {
+		ui.Row(c).Gap(10).Padding(8, 14).AlignItems(ui.Center).Background(tk.BgContainer).Children(func() {
+			if action.ActionIcon(c, lucide.ChevronLeft(), action.ActionIconProps{
+				Title: "返回终端",
+			}).Clicked() && p.Back != nil {
 				p.Back()
 			}
 			ui.Column(c).Gap(2).Grow(1).Children(func() {
 				ui.Text(c, p.Profile.Title()+" 的文件").Bold()
-				ui.Text(c, p.Profile.Endpoint()).FontSize(11).TextColor(t.TextMuted)
+				ui.Text(c, p.Profile.Endpoint()).FontSize(11).TextColor(tk.TextTertiary)
 			})
 		})
+		ui.Divider(c)
 		ui.Split(c, &p.SideWidth, func() {
 			filepanel.View(c, p.Local, nil)
 		}, func() {

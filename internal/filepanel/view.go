@@ -8,6 +8,13 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
+	"github.com/lobehub/lobe-mygo/pkg/action"
+	"github.com/lobehub/lobe-mygo/pkg/feedback"
+	"github.com/lobehub/lobe-mygo/pkg/field"
+	"github.com/lobehub/lobe-mygo/pkg/layout"
+	"github.com/lobehub/lobe-mygo/pkg/lucide"
+	"github.com/lobehub/lobe-mygo/pkg/overlay"
+	"github.com/lobehub/lobe-mygo/pkg/theme"
 )
 
 // base is the last part of a path.
@@ -22,98 +29,118 @@ func View(c *ui.Context, p *Panel, changed func()) {
 	if p == nil {
 		return
 	}
-	t := c.Theme()
-	ui.Column(c).Fill().Background(t.Background).Children(func() {
-		ui.Row(c).Gap(6).Padding(8, 10).AlignItems(ui.Center).Children(func() {
-			if ui.Button(c, "↑").Clicked() {
+	tk := theme.TokensOf(c)
+	ui.Column(c).Fill().Background(tk.BgLayout).Children(func() {
+		ui.Row(c).Gap(6).Padding(6, 8).AlignItems(ui.Center).Background(tk.BgContainer).Children(func() {
+			if action.ActionIcon(c, lucide.ArrowUp(), action.ActionIconProps{
+				Size: theme.Small, Title: "上一级",
+			}).Clicked() {
 				p.Parent(changed)
 			}
-			ui.Text(c, p.Dir()).FontSize(12).Grow(1).SingleLine().TextColor(t.TextMuted)
-			if ui.Button(c, "刷新").Clicked() {
+			ui.Text(c, p.Dir()).FontSize(12).Grow(1).SingleLine().TextColor(tk.TextSecondary)
+			if action.ActionIcon(c, lucide.FolderPlus(), action.ActionIconProps{
+				Size: theme.Small, Title: "新建目录",
+			}).Clicked() {
+				p.openDialog("mkdir", "新建目录")
+			}
+			if action.ActionIcon(c, lucide.RefreshCw(), action.ActionIconProps{
+				Size: theme.Small, Title: "刷新",
+			}).Clicked() {
 				p.Refresh(changed)
 			}
 		})
+		ui.Divider(c)
 		if msg := p.Err(); msg != "" {
-			ui.Row(c).Gap(8).Padding(6, 10).Children(func() {
-				ui.Text(c, "读取失败:"+msg).FontSize(12).TextColor(t.Danger).Grow(1)
-				if ui.Button(c, "重试").Clicked() {
+			ui.Row(c).Padding(6, 8).Children(func() {
+				feedback.Alert(c, "读取失败", feedback.AlertProps{
+					Type:        feedback.Error,
+					Description: msg,
+				})
+			})
+		}
+		layout.ScrollArea(c, layout.ScrollAreaProps{Fade: true}, func() {
+			ui.Column(c).FillWidth().Padding(4).Gap(2).Children(func() {
+				for _, e := range p.Entries() {
+					entryView(c, p, e, changed, tk)
+				}
+				// 空白处也收右键:新建目录、刷新。
+				blank := ui.Row(c).FillWidth().Grow(1).MinHeight(60)
+				switch overlay.ContextMenu(c, blank, overlay.DropdownMenuProps{Items: columnItems()}) {
+				case "mkdir":
+					p.openDialog("mkdir", "新建目录")
+				case "refresh":
 					p.Refresh(changed)
 				}
 			})
-		} else if p.Loading() {
-			ui.Row(c).Gap(8).Padding(6, 10).Children(func() {
-				ui.Text(c, "读取中…").FontSize(12).TextColor(t.TextMuted)
+		}).Grow(1)
+		if p.Loading() && len(p.Entries()) == 0 {
+			ui.Row(c).FillWidth().Justify(ui.Center).Padding(12).Children(func() {
+				feedback.Spin(c, feedback.SpinProps{Size: theme.Small}, nil)
 			})
 		}
-		ui.Scroll(c).Grow(1).Children(func() {
-			ui.Column(c).FillWidth().Padding(4).Gap(2).Children(func() {
-				for _, e := range p.Entries() {
-					entry := e
-					isDir := entry.IsDir
-					name := entry.Name
-					row := ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Padding(4, 8)
-					row.ContextMenu(func(m *ui.Menu) { rowMenu(m, p, entry, changed) })
-					row.Children(func() {
-						label := "📄"
-						if isDir {
-							label = "📁"
-						}
-						if ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).Children(func() {
-							ui.Text(c, label)
-							ui.Text(c, name).Grow(1).SingleLine()
-							if !isDir {
-								ui.Text(c, size(entry.Size)).FontSize(11).TextColor(t.TextMuted)
-								ui.Text(c, entry.Moded.Format("01-02 15:04")).FontSize(11).TextColor(t.TextMuted)
-							}
-						}).Clicked() {
-							if isDir {
-								p.Visit(name, changed)
-							}
-						}
-					})
-				}
-				// 空白处也收右键:新建目录、刷新。
-				ui.Row(c).FillWidth().Grow(1).ContextMenu(func(m *ui.Menu) {
-					columnMenu(m, p, changed)
-				})
-			})
-		})
 		if p.dialogOpen() {
 			p.dialogView(c, changed)
 		}
 	})
 }
 
-// rowMenu fills the context menu of one listing row: 进入 for a
-// directory, 发送到对列 for a file, then 重命名 and 删除 for either.
-func rowMenu(m *ui.Menu, p *Panel, e sshclient.Entry, changed func()) {
-	name := e.Name
-	if e.IsDir {
-		if m.Item("进入").Chosen() {
-			p.Visit(name, changed)
+// entryView is one row of the listing: its icon, name and, for a file,
+// its size and time, with a right-click menu of what the row can do.
+func entryView(c *ui.Context, p *Panel, e sshclient.Entry, changed func(), tk *theme.Tokens) {
+	row := ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Padding(5, 8).Radius(tk.BorderRadiusSM)
+	switch overlay.ContextMenu(c, row, overlay.DropdownMenuProps{Items: rowItems(e)}) {
+	case "enter":
+		p.Visit(e.Name, changed)
+	case "send":
+		p.sendOut(e.Name)
+	case "rename":
+		p.openRename(e.Name)
+	case "remove":
+		p.Remove(e.Name, changed, plistSay)
+	}
+	row.Children(func() {
+		glyph, color := lucide.File(), tk.TextTertiary
+		if e.IsDir {
+			glyph, color = lucide.Folder(), tk.Primary
 		}
-	} else {
-		if m.Item("发送到对列").Chosen() {
-			p.sendOut(name)
+		if ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).MinWidth(0).Children(func() {
+			ui.Icon(c, glyph).FontSize(15).TextColor(color)
+			ui.Text(c, e.Name).FontSize(13).Grow(1).SingleLine()
+			if !e.IsDir {
+				ui.Text(c, size(e.Size)).FontSize(11).TextColor(tk.TextTertiary)
+				ui.Text(c, e.Moded.Format("01-02 15:04")).FontSize(11).TextColor(tk.TextTertiary)
+			}
+		}).Clicked() {
+			if e.IsDir {
+				p.Visit(e.Name, changed)
+			}
 		}
-	}
-	if m.Item("重命名").Chosen() {
-		p.openRename(name)
-	}
-	m.Separator()
-	if m.Item("删除").Chosen() {
-		p.Remove(name, changed, plistSay)
-	}
+	})
 }
 
-// columnMenu fills the context menu of the column's blank space:
-// 新建目录 asks a name in the small dialog, 刷新 reloads the listing.
-func columnMenu(m *ui.Menu, p *Panel, changed func()) {
-	if m.Item("新建目录").Chosen() {
-		p.openDialog("mkdir", "新建目录")
+// rowItems is the context menu of one listing row: 进入 for a
+// directory, 发送到对列 for a file, then 重命名 and 删除 for either.
+func rowItems(e sshclient.Entry) []overlay.MenuItem {
+	items := make([]overlay.MenuItem, 0, 4)
+	if e.IsDir {
+		items = append(items, overlay.MenuItem{Key: "enter", Label: "进入", Icon: lucide.FolderOpen()})
+	} else {
+		items = append(items, overlay.MenuItem{Key: "send", Label: "发送到对列", Icon: lucide.ArrowLeftRight()})
 	}
-	if m.Item("刷新").Chosen() {
-		p.Refresh(changed)
+	items = append(items,
+		overlay.MenuItem{Key: "rename", Label: "重命名", Icon: lucide.Pencil()},
+		overlay.MenuItem{Divider: true},
+		overlay.MenuItem{Key: "remove", Label: "删除", Icon: lucide.Trash2(), Danger: true},
+	)
+	return items
+}
+
+// columnItems is the context menu of the column's blank space:
+// 新建目录 asks a name in the small dialog, 刷新 reloads the listing.
+func columnItems() []overlay.MenuItem {
+	return []overlay.MenuItem{
+		{Key: "mkdir", Label: "新建目录", Icon: lucide.FolderPlus()},
+		{Key: "refresh", Label: "刷新", Icon: lucide.RefreshCw()},
 	}
 }
 
@@ -122,20 +149,17 @@ func columnMenu(m *ui.Menu, p *Panel, changed func()) {
 func (p *Panel) dialogView(c *ui.Context, changed func()) {
 	kind := p.dialogKindName()
 	title := map[string]string{"mkdir": "新建目录", "rename": "重命名"}[kind]
-	ui.Modal(c, p.dialogFlag(), func() {
-		ui.Column(c).Width(280).Gap(10).Padding(16).Background(c.Theme().Background).Radius(10).Children(func() {
-			ui.Text(c, title).Bold()
-			ui.TextInput(c, p.dialogBuffer()).Placeholder(title).SingleLine()
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				if ui.Button(c, "取消").Clicked() {
-					p.closeDialog()
-				}
-				if ui.PrimaryButton(c, "确定").Clicked() {
-					p.closeDialogAct(kind, changed)
-				}
-			})
-		})
+	ok := feedback.Modal(c, p.dialogFlag(), feedback.ModalProps{
+		Title:      title,
+		Width:      360,
+		OkText:     "确定",
+		CancelText: "取消",
+	}, func() {
+		field.Input(c, p.dialogBuffer(), field.InputProps{Placeholder: title})
 	})
+	if ok {
+		p.closeDialogAct(kind, changed)
+	}
 }
 
 // closeDialogAct takes the dialog down and runs what it confirmed:

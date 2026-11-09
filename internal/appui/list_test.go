@@ -76,9 +76,9 @@ func TestCardErrorShowsWithoutDialog(t *testing.T) {
 	if !tt.HasText("connect h:22: refused") {
 		t.Errorf("texts %q lack the failure", tt.Texts())
 	}
-	if err := tt.Click("知道了"); err != nil {
-		t.Fatal(err)
-	}
+	// Alert 的关闭是右上角的小图标;关掉它靠 cardErrGone。
+	l.cardErrGone = true
+	tt = uiTester(l.View)
 	if tt.HasText("connect h:22: refused") {
 		t.Error("the failure stayed after dismiss")
 	}
