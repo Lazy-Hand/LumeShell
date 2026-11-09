@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 )
 
 // Auth is one way to prove the user's identity to a server.
@@ -16,7 +18,9 @@ type Auth interface {
 	methods() ([]ssh.AuthMethod, error)
 }
 
-// PasswordAuth proves identity with the user's password.
+// PasswordAuth proves identity with the user's password. It also answers
+// keyboard-interactive challenges with the same password, for servers
+// that only take those.
 type PasswordAuth struct {
 	Password string
 }
@@ -28,8 +32,25 @@ type KeyAuth struct {
 	Passphrase string
 }
 
+// AgentAuth proves identity with the keys in the system's ssh-agent;
+// its methods come after whatever Auth is already on the profile, so a
+// saved password or key still wins when the server takes either.
+type AgentAuth struct{}
+
 func (a PasswordAuth) methods() ([]ssh.AuthMethod, error) {
-	return []ssh.AuthMethod{ssh.Password(a.Password)}, nil
+	return []ssh.AuthMethod{
+		ssh.Password(a.Password),
+		ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
+			// 服务器问什么我们都回密码——常规 keyboard-interactive
+			// 只问一次"Password:";真要交互的多问题场景答不了,
+			// 让 auth 失败就行。
+			out := make([]string, len(questions))
+			for i := range out {
+				out[i] = a.Password
+			}
+			return out, nil
+		}),
+	}, nil
 }
 
 func (a KeyAuth) methods() ([]ssh.AuthMethod, error) {
@@ -42,6 +63,27 @@ func (a KeyAuth) methods() ([]ssh.AuthMethod, error) {
 		return nil, fmt.Errorf("key %s: %w", a.KeyPath, err)
 	}
 	return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
+}
+
+func (AgentAuth) methods() ([]ssh.AuthMethod, error) {
+	sock := os.Getenv("SSH_AUTH_SOCK")
+	if sock == "" {
+		return nil, nil // 没有 agent 在跑,什么也不加
+	}
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		return nil, fmt.Errorf("ssh-agent: %w", err)
+	}
+	signers, err := agent.NewClient(conn).Signers()
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("ssh-agent list: %w", err)
+	}
+	if len(signers) == 0 {
+		conn.Close()
+		return nil, nil
+	}
+	return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, nil
 }
 
 // loadKey reads a PEM private key file, decrypting it with passphrase
@@ -103,6 +145,11 @@ func Connect(conf Config) (*Client, error) {
 		}
 	} else {
 		return nil, errors.New("no authentication configured")
+	}
+	// ssh-agent 的钥匙追加在最后:档案里配的认证先问,agent 兜底,
+	// 让两种都通的服务器按档案的来。
+	if extra, err := (AgentAuth{}).methods(); err == nil {
+		auths = append(auths, extra...)
 	}
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(conf.Host, conf.Port), conf.Timeout)
 	if err != nil {
