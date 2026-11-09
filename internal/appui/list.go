@@ -91,6 +91,7 @@ func (l *List) View(c *ui.Context) {
 		ui.Column(c).Gap(6).AlignItems(ui.Center).Children(func() {
 			ui.Text(c, "Lume").FontSize(28).Bold()
 			ui.Text(c, "SSH 终端").FontSize(14).TextColor(tk.TextSecondary)
+			l.themeRow(c)
 		})
 		if l.form.open {
 			l.formView(c)
@@ -98,6 +99,32 @@ func (l *List) View(c *ui.Context) {
 			l.cardsView(c)
 		}
 	})
+}
+
+// themeRow is the appearance switch under the title: 跟随系统 / 浅色 /
+// 深色. It writes prefs.json and flips the look the same frame.
+func (l *List) themeRow(c *ui.Context) {
+	src := mygo.Theme.Source()
+	idx := 0
+	switch src {
+	case mygo.ThemeLight:
+		idx = 1
+	case mygo.ThemeDark:
+		idx = 2
+	}
+	before := idx
+	action.Segmented(c, &idx, []string{"跟随系统", "浅色", "深色"}, action.SegmentedProps{})
+	if idx == before {
+		return
+	}
+	switch idx {
+	case 1:
+		SaveThemeSource(mygo.ThemeLight)
+	case 2:
+		SaveThemeSource(mygo.ThemeDark)
+	default:
+		SaveThemeSource(mygo.ThemeSystem)
+	}
 }
 
 // cardsView shows the saved hosts, most recently used first, and the

@@ -116,6 +116,7 @@ func main() {
 	a := &app{sess: map[string]*session{}}
 	var listErr error
 	mygo.App.WhenReady(func() {
+		mygo.Theme.SetSource(appui.LoadThemeSource())
 		dir, err := mygo.App.Path(mygo.PathUserData)
 		if err == nil {
 			a.store, listErr = profiles.Open(dir)
