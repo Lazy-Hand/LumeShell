@@ -34,7 +34,7 @@ type SFTP struct {
 // SFTP opens the file channel of the connection. Failures end the
 // connection, as a broken transport does.
 func (c *Client) SFTP() (*SFTP, error) {
-	cl, err := sftp.NewClient(c.ssh)
+	cl, err := sftp.NewClient(c.ssh, sftp.UseConcurrentWrites(true))
 	if err != nil {
 		return nil, fmt.Errorf("sftp: %w", err)
 	}
@@ -118,8 +118,9 @@ func (fs *SFTP) get(remote, dest string) error {
 
 // Send copies this channel's remote file at src into the destination
 // channel's writer at remote, streaming so progress reports as bytes
-// pass. The destination is the panel's other column (a second SFTP
-// channel or the local one), reached by the writerFor it serves.
+// pass. A file past the chunk threshold goes in concurrent pieces when
+// the destination takes writes at an offset (the local disk does, and a
+// second SFTP channel would too).
 func (fs *SFTP) Send(src, remote string, dst WriterFor, report func(done, total int64)) error {
 	in, err := fs.cl.Open(src)
 	if err != nil {
@@ -133,13 +134,23 @@ func (fs *SFTP) Send(src, remote string, dst WriterFor, report func(done, total 
 	if st.IsDir() {
 		return fmt.Errorf("%s is a directory", src)
 	}
-	var from io.Reader = in
-	if report != nil {
-		from = &progressReader{r: in, total: st.Size(), report: report}
-	}
 	out, err := dst.Create(remote)
 	if err != nil {
 		return err
+	}
+	if st.Size() >= chunkThreshold {
+		if wa, ok := out.(io.WriterAt); ok {
+			err := SendChunked(in, wa, st.Size(), report)
+			cerr := out.Close()
+			if err != nil {
+				return err
+			}
+			return cerr
+		}
+	}
+	var from io.Reader = in
+	if report != nil {
+		from = &progressReader{r: in, total: st.Size(), report: report}
 	}
 	if _, err := io.Copy(out, from); err != nil {
 		out.Close()

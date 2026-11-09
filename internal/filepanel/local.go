@@ -56,6 +56,8 @@ func (LocalFS) Download(src, dest string) error {
 // Send copies this channel's local file at src to the destination
 // channel's remote path: the source reads from disk, the destination
 // writes (local file or SFTP), and report hears the bytes as they go.
+// A file past the chunk threshold goes in concurrent pieces when the
+// destination takes writes at an offset — an upload to the server does.
 func (LocalFS) Send(src, remote string, dst sshclient.WriterFor, report func(done, total int64)) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -66,13 +68,23 @@ func (LocalFS) Send(src, remote string, dst sshclient.WriterFor, report func(don
 	if err != nil {
 		return err
 	}
-	var from io.Reader = in
-	if report != nil {
-		from = &reportReader{r: in, total: st.Size(), report: report}
-	}
 	out, err := dst.Create(remote)
 	if err != nil {
 		return err
+	}
+	if st.Size() >= 8<<20 {
+		if wa, ok := out.(io.WriterAt); ok {
+			err := sshclient.SendChunked(in, wa, st.Size(), report)
+			cerr := out.Close()
+			if err != nil {
+				return err
+			}
+			return cerr
+		}
+	}
+	var from io.Reader = in
+	if report != nil {
+		from = &reportReader{r: in, total: st.Size(), report: report}
 	}
 	if _, err := io.Copy(out, from); err != nil {
 		out.Close()
