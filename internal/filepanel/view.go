@@ -131,11 +131,13 @@ func entryView(c *ui.Context, p *Panel, e sshclient.Entry, changed func(), tk *t
 	if _, over := ui.DragOver[dragItem](row); over {
 		row.Background(tk.FillTertiary)
 	}
-	switch overlay.ContextMenu(c, row, overlay.DropdownMenuProps{Items: rowItems(e)}) {
+	switch overlay.ContextMenu(c, row, overlay.DropdownMenuProps{Items: rowItems(p, e)}) {
 	case "enter":
 		p.Visit(e.Name, changed)
 	case "send":
 		p.sendOut(e.Name, e.IsDir)
+	case "edit":
+		p.editOnline(e.Name)
 	case "rename":
 		p.openRename(e.Name)
 	case "remove":
@@ -168,13 +170,17 @@ func entryView(c *ui.Context, p *Panel, e sshclient.Entry, changed func(), tk *t
 }
 
 // rowItems is the context menu of one listing row: 进入 for a
-// directory, 发送到对列 for a file, then 重命名 and 删除 for either.
-func rowItems(e sshclient.Entry) []overlay.MenuItem {
-	items := make([]overlay.MenuItem, 0, 4)
+// directory, 发送到对列 for a file, then 重命名 and 删除 for either;
+// the remote column's files also offer 编辑 (在线编辑并回传).
+func rowItems(p *Panel, e sshclient.Entry) []overlay.MenuItem {
+	items := make([]overlay.MenuItem, 0, 5)
 	if e.IsDir {
 		items = append(items, overlay.MenuItem{Key: "enter", Label: "进入", Icon: lucide.FolderOpen()})
 	} else {
 		items = append(items, overlay.MenuItem{Key: "send", Label: "发送到对列", Icon: lucide.ArrowLeftRight()})
+		if p.IsRemote {
+			items = append(items, overlay.MenuItem{Key: "edit", Label: "编辑", Icon: lucide.PencilLine()})
+		}
 	}
 	items = append(items,
 		overlay.MenuItem{Key: "rename", Label: "重命名", Icon: lucide.Pencil()},

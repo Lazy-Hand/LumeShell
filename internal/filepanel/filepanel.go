@@ -30,10 +30,12 @@ type fileChan interface {
 	Close() error
 }
 
-// Panel is one session's file browser.
+// Panel is one session's file browser. IsRemote marks the server side,
+// which alone offers 编辑 (在线编辑远端文件).
 type Panel struct {
 	sync.Mutex
 	fs        fileChan
+	IsRemote  bool
 	dir       string
 	entries   []sshclient.Entry
 	loading   map[string]bool   // a ReadDir is up for a dir

@@ -204,6 +204,7 @@ func (a *app) filesPage(p profiles.Profile) {
 		}
 		changed := func() { a.win.Update(func() {}) }
 		remote := filepanel.New(fs, home)
+		remote.IsRemote = true
 		localDir := filepanel.LocalHome()
 		local := filepanel.New(filepanel.LocalFS{}, localDir)
 		remote.SetOther(local, changed)
