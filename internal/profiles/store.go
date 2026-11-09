@@ -27,11 +27,11 @@ type file struct {
 // Store holds the saved profiles. Its methods are safe from any
 // goroutine, and each save writes the whole file.
 type Store struct {
-	mu       sync.Mutex
-	path     string
-	byID     map[string]Profile
-	ticket   int // grows with every use; LRU is the lowest ticket
-	sel      string
+	mu     sync.Mutex
+	path   string
+	byID   map[string]Profile
+	ticket int // grows with every use; LRU is the lowest ticket
+	sel    string
 }
 
 // Open reads the store at dir/profiles.json, empty when none is there.

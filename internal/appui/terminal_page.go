@@ -60,11 +60,11 @@ func (p *TermPage) View(c *ui.Context) {
 // local machine's files on the left, the server's on the right. Each
 // side browses on its own; whose 出发 the transfer the middle tells.
 type FilesPage struct {
-	Profile  profiles.Profile
-	Remote   *filepanel.Panel // the server's files
-	Local    *filepanel.Panel // this machine's files
+	Profile   profiles.Profile
+	Remote    *filepanel.Panel // the server's files
+	Local     *filepanel.Panel // this machine's files
 	SideWidth float32          // the local column's width
-	Closed   bool             // the middle's 收起, one column each side
+	Closed    bool             // the middle's 收起, one column each side
 
 	// Back runs when the user leaves the browser; Upload and Download
 	// run with a local path and the remote panel's directory.

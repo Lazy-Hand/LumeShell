@@ -173,6 +173,10 @@ func (a *app) filesPage(p profiles.Profile) {
 		a.win.Update(func() { a.hub.Now = appui.Files })
 		return
 	}
+	if a.hub.Files != nil {
+		a.win.Update(func() { a.hub.Now = appui.Files })
+		return
+	}
 	go func() {
 		fs, err := conn.SFTP()
 		if err != nil {
@@ -192,6 +196,10 @@ func (a *app) filesPage(p profiles.Profile) {
 		remote.Open(home, changed)
 		local.Open(localDir, changed)
 		a.connMu.Lock()
+		if a.panel != nil && a.panel != remote {
+			a.panel.Close() // 上次会话留下的 SFTP 通道
+		}
+		a.panel = remote
 		page := &appui.FilesPage{
 			Profile:   p,
 			Remote:    remote,

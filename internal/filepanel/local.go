@@ -39,6 +39,7 @@ func (LocalFS) ReadDir(dir string) ([]sshclient.Entry, error) {
 
 func (LocalFS) Mkdir(dir string) error       { return os.Mkdir(dir, 0o755) }
 func (LocalFS) Remove(p string) error        { return os.Remove(p) }
+func (LocalFS) Rename(from, to string) error { return os.Rename(from, to) }
 
 // Download copies a local file to a local path: the panel's download
 // button over the local column stays but moves files, so beside itself
@@ -51,8 +52,8 @@ func (LocalFS) Download(src, dest string) error {
 	return os.WriteFile(dest, data, 0o644)
 }
 
-func (LocalFS) Upload(src, dest string) error      { return LocalFS{}.Download(src, dest) }
-func (LocalFS) Close() error                       { return nil }
+func (LocalFS) Upload(src, dest string) error { return LocalFS{}.Download(src, dest) }
+func (LocalFS) Close() error                  { return nil }
 
 // LocalHome is where the local column starts: the user's home, with a
 // fallback per platform when the system does not say.

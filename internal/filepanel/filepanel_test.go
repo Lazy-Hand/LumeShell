@@ -40,9 +40,10 @@ func (f *fakeFS) ReadDir(dir string) ([]sshclient.Entry, error) {
 
 func (f *fakeFS) Mkdir(dir string) error       { return os.Mkdir(dir, 0o755) }
 func (f *fakeFS) Remove(p string) error        { return os.Remove(p) }
+func (f *fakeFS) Rename(from, to string) error { return os.Rename(from, to) }
 func (f *fakeFS) Download(_, _ string) error   { return nil }
 func (f *fakeFS) Upload(_, _ string) error     { return nil }
-func (f *fakeFS) Close() error { return nil }
+func (f *fakeFS) Close() error                 { return nil }
 
 // newPanel is a panel over a fresh local tree, its listing not loaded.
 func newPanel(t *testing.T) (*Panel, string) {
@@ -143,7 +144,9 @@ func TestMkdirAndRemove(t *testing.T) {
 	said := make(chan string, 8)
 	say := func(title, _ string) { said <- title }
 
-	p.Mkdir("新建", func() { changed <- struct{}{} }, say)
+	// Mkdir 走暂存的名字,由对话框的确定带进来。
+	p.newDir = "新建"
+	p.Mkdir(func() { changed <- struct{}{} })
 	waitChanged(t, changed)
 	if _, err := os.Stat(home + "/新建"); err != nil {
 		t.Fatal("the directory is not there")
@@ -158,6 +161,27 @@ func TestMkdirAndRemove(t *testing.T) {
 	waitChanged(t, changed)
 	if _, err := os.Stat(home + "/新建"); !os.IsNotExist(err) {
 		t.Fatal("the directory is still there")
+	}
+}
+
+func TestRename(t *testing.T) {
+	p, home := newPanel(t)
+	changed := make(chan struct{}, 8)
+	if err := os.WriteFile(home+"/old.txt", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p.Open(home, func() { changed <- struct{}{} })
+	waitChanged(t, changed)
+
+	// 重命名走对话框的暂存:from 来自右键的行,to 是输入的名字。
+	p.rename, p.renameTo = "old.txt", "new.txt"
+	p.DoRename(func() { changed <- struct{}{} })
+	waitChanged(t, changed)
+	if _, err := os.Stat(home + "/new.txt"); err != nil {
+		t.Fatalf("renamed file not there: %v", err)
+	}
+	if _, err := os.Stat(home + "/old.txt"); !os.IsNotExist(err) {
+		t.Fatal("old.txt still there")
 	}
 }
 
