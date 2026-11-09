@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"lume/internal/appui"
@@ -36,20 +38,24 @@ type session struct {
 	tunnelV *appui.TunnelView
 	trigV   *appui.TriggerView
 	watcher *appui.TriggerWatcher
+	logger  *sshclient.SessionLogger
 	panel   *filepanel.Panel // the remote panel, for closing
 }
 
 // scanConn wraps a session's Conn so what the terminal reads also
-// passes the trigger watcher. Only Read is touched; the rest delegates.
+// passes the trigger watcher and the session log. Only Read is
+// touched; the rest delegates.
 type scanConn struct {
 	io.ReadWriteCloser
-	w *appui.TriggerWatcher
+	w   *appui.TriggerWatcher
+	log *sshclient.SessionLogger
 }
 
 func (s scanConn) Read(p []byte) (int, error) {
 	n, err := s.ReadWriteCloser.Read(p)
 	if n > 0 {
 		s.w.Scan(p[:n])
+		s.log.Write(p[:n])
 	}
 	return n, err
 }
@@ -227,9 +233,10 @@ func (a *app) connect(p profiles.Profile, s appui.Secret) {
 		ss := &session{id: id, profile: p, secret: s, conn: conn}
 		ss.watcher = appui.NewTriggerWatcher(func(matched string) { a.triggerHit(id, matched) })
 		ss.trigV = appui.NewTriggerView(ss.watcher)
+		ss.logger = sshclient.OpenSessionLogger(a.logDir(), id+"-"+sanitizeLogName(p.Title()))
 		var tconn io.ReadWriteCloser = sess
-		if ss.watcher.HasPatterns() {
-			tconn = scanConn{ReadWriteCloser: sess, w: ss.watcher}
+		if ss.watcher.HasPatterns() || ss.logger.Path() != "" {
+			tconn = scanConn{ReadWriteCloser: sess, w: ss.watcher, log: ss.logger}
 		}
 		term, err := terminal.New(terminal.Options{
 			Conn:        tconn,
@@ -420,8 +427,8 @@ func (a *app) reconnect(ss *session) bool {
 		return false
 	}
 	var tconn io.ReadWriteCloser = sess
-	if ss.watcher.HasPatterns() {
-		tconn = scanConn{ReadWriteCloser: sess, w: ss.watcher}
+	if ss.watcher.HasPatterns() || ss.logger.Path() != "" {
+		tconn = scanConn{ReadWriteCloser: sess, w: ss.watcher, log: ss.logger}
 	}
 	term, err := terminal.New(terminal.Options{
 		Conn:        tconn,
@@ -455,6 +462,33 @@ func (a *app) reconnect(ss *session) bool {
 		a.hub.Now = appui.Session
 	})
 	return true
+}
+
+// logDir is where session logs go: logs/ beside the profiles file.
+func (a *app) logDir() string {
+	dir, err := mygo.App.Path(mygo.PathUserData)
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "logs")
+}
+
+// sanitizeLogName keeps a session title safe inside a filename.
+func sanitizeLogName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.', r >= 0x80: // 汉字等放行
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "session"
+	}
+	return b.String()
 }
 
 // triggerHit runs when the watcher's pattern matches session id's
@@ -498,6 +532,9 @@ func (a *app) closeSession(id string) {
 	if ss.panel != nil {
 		ss.panel.Close()
 	}
+	if ss.logger != nil {
+		ss.logger.Close()
+	}
 	ss.conn.Close()
 	a.win.Update(func() {
 		if next == "" {
@@ -521,6 +558,9 @@ func (a *app) teardownAll() {
 		ss.term.Close()
 		if ss.panel != nil {
 			ss.panel.Close()
+		}
+		if ss.logger != nil {
+			ss.logger.Close()
 		}
 		ss.conn.Close()
 	}
