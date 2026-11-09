@@ -46,6 +46,9 @@ type List struct {
 		password string
 		keyPath  string
 		passphr  string
+		jumpHost string // 可空:配了就先连它再到目标
+		jumpPort string
+		jumpUser string
 		choosing bool   // a file dialog is up
 		editing  string // the profile being connected, empty for a new one
 	}
@@ -180,8 +183,10 @@ func (l *List) editForm(p profiles.Profile, fresh bool) {
 	f.host = p.Host
 	f.port = p.Port
 	f.user = p.User
+	f.jumpHost, f.jumpPort, f.jumpUser = p.JumpHost, p.JumpPort, p.JumpUser
 	if !fresh {
 		f.label, f.host, f.port, f.user = "", "", "", ""
+		f.jumpHost, f.jumpPort, f.jumpUser = "", "", ""
 	}
 	switch {
 	case p.Auth == profiles.Key:
@@ -237,6 +242,20 @@ func (l *List) formView(c *ui.Context) {
 			ui.Field(c, "认证方式", func() {
 				action.Segmented(c, &f.auth, []string{"密码", "私钥"}, action.SegmentedProps{Block: true})
 			})
+			// 跳板机可空:填了就先连它再到目标,认证沿用上面的方式。
+			ui.Field(c, "跳板机（可空）", func() {
+				ui.Row(c).Gap(8).Children(func() {
+					ui.Column(c).Grow(2).Children(func() {
+						field.Input(c, &f.jumpHost, field.InputProps{Placeholder: "jump.example.com"})
+					})
+					ui.Column(c).Width(70).Children(func() {
+						field.Input(c, &f.jumpPort, field.InputProps{Placeholder: "22"})
+					})
+					ui.Column(c).Grow(1).Children(func() {
+						field.Input(c, &f.jumpUser, field.InputProps{Placeholder: "同用户名"})
+					})
+				})
+			})
 			if f.auth == 0 { // 密码
 				ui.Field(c, "登录密码", func() {
 					field.InputPassword(c, &f.password, field.InputProps{Placeholder: "登录密码"})
@@ -279,14 +298,17 @@ func (l *List) submit() {
 		keyPath = f.keyPath
 	}
 	p := profiles.Profile{
-		ID:      f.editing, // 连接已存主机时保持它,不挤出新条目
-		Label:   f.label,
-		Host:    f.host,
-		Port:    f.port,
-		User:    f.user,
-		Auth:    authType,
-		KeyPath: keyPath,
-		HasPass: true, // 密码与口令只留在本页,不入盘
+		ID:       f.editing, // 连接已存主机时保持它,不挤出新条目
+		Label:    f.label,
+		Host:     f.host,
+		Port:     f.port,
+		User:     f.user,
+		Auth:     authType,
+		KeyPath:  keyPath,
+		HasPass:  true, // 密码与口令只留在本页,不入盘
+		JumpHost: f.jumpHost,
+		JumpPort: f.jumpPort,
+		JumpUser: f.jumpUser,
 	}
 	if _, err := l.store.Save(p); err != nil {
 		// 表单不完整:对话框留着,Alert 说缺了什么。

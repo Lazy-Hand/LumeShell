@@ -119,6 +119,14 @@ func (a *app) connect(p profiles.Profile, s appui.Secret) {
 		var conn *sshclient.Client
 		if err == nil {
 			conf := sshclient.Config{Host: p.Host, Port: p.Port, User: p.User, Auth: auth}
+			if p.JumpHost != "" {
+				conf.Jump = &sshclient.Jump{
+					Host: p.JumpHost,
+					Port: p.JumpPort,
+					User: p.JumpUser,
+					Auth: auth, // 跳板复用同一种认证,口令也是同一个
+				}
+			}
 			conn, err = sshclient.Connect(conf)
 		}
 		if err != nil {

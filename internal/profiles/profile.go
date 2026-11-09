@@ -19,14 +19,19 @@ const (
 
 // Profile is one saved host.
 type Profile struct {
-	ID        string    `json:"id"`
-	Label     string    `json:"label,omitempty"`
-	Host      string    `json:"host"`
-	Port      string    `json:"port,omitempty"` // empty: 22
-	User      string    `json:"user"`
-	Auth      AuthType  `json:"auth"`
-	KeyPath   string    `json:"keyPath,omitempty"` // Auth is Key
-	HasPass   bool      `json:"hasPass"`           // the key had a passphrase or the host a password
+	ID      string   `json:"id"`
+	Label   string   `json:"label,omitempty"`
+	Host    string   `json:"host"`
+	Port    string   `json:"port,omitempty"` // empty: 22
+	User    string   `json:"user"`
+	Auth    AuthType `json:"auth"`
+	KeyPath string   `json:"keyPath,omitempty"` // Auth is Key
+	HasPass bool     `json:"hasPass"`           // the key had a passphrase or the host a password
+	// Jump 是可选跳板机:非空时先连它,再经它拨目标,等同
+	// ssh -J。它的认证复用 Auth/KeyPath/HasPass 的同一组。
+	JumpHost  string    `json:"jumpHost,omitempty"`
+	JumpPort  string    `json:"jumpPort,omitempty"`
+	JumpUser  string    `json:"jumpUser,omitempty"`
 	LastUsed  time.Time `json:"lastUsed"`
 	CreatedAt time.Time `json:"createdAt"`
 }
