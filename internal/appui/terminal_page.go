@@ -34,6 +34,7 @@ type TermPage struct {
 	Profile  profiles.Profile
 	Term     *terminal.Terminal
 	Snippets *SnippetView
+	Triggers *TriggerView
 
 	// Back runs when the user leaves the terminal; ToFiles opens the
 	// file browser over the same connection; Tunnels opens the port
@@ -60,6 +61,11 @@ func (p *TermPage) View(c *ui.Context) {
 			}).Clicked() && p.Snippets != nil {
 				p.Snippets.Open()
 			}
+			if action.ActionIcon(c, lucide.BellRing(), action.ActionIconProps{
+				Title: "触发器",
+			}).Clicked() && p.Triggers != nil {
+				p.Triggers.Open()
+			}
 			if action.ActionIcon(c, lucide.Globe(), action.ActionIconProps{
 				Title: "隧道",
 			}).Clicked() && p.Tunnels != nil {
@@ -76,6 +82,9 @@ func (p *TermPage) View(c *ui.Context) {
 	})
 	if p.Snippets != nil {
 		p.Snippets.View(c, p.Term)
+	}
+	if p.Triggers != nil {
+		p.Triggers.View(c)
 	}
 }
 

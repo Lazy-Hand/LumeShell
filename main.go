@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"sync"
 
@@ -33,7 +34,35 @@ type session struct {
 	termPg  *appui.TermPage
 	filesPg *appui.FilesPage
 	tunnelV *appui.TunnelView
+	trigV   *appui.TriggerView
+	watcher *appui.TriggerWatcher
 	panel   *filepanel.Panel // the remote panel, for closing
+}
+
+// scanConn wraps a session's Conn so what the terminal reads also
+// passes the trigger watcher. Only Read is touched; the rest delegates.
+type scanConn struct {
+	io.ReadWriteCloser
+	w *appui.TriggerWatcher
+}
+
+func (s scanConn) Read(p []byte) (int, error) {
+	n, err := s.ReadWriteCloser.Read(p)
+	if n > 0 {
+		s.w.Scan(p[:n])
+	}
+	return n, err
+}
+
+// Resize passes through to the wrapped Conn so the remote still hears
+// the view's size.
+func (s scanConn) Resize(cols, rows int) error {
+	if r, ok := s.ReadWriteCloser.(interface {
+		Resize(cols, rows int) error
+	}); ok {
+		return r.Resize(cols, rows)
+	}
+	return nil
 }
 
 // app is the state the window shows. Its view builds the interface from
@@ -145,6 +174,9 @@ func (a *app) tabs(c *ui.Context) {
 			}
 			btn.Children(func() {
 				ui.Text(c, sess.profile.Title()).SingleLine()
+				if sess.watcher != nil && sess.watcher.Seen() {
+					ui.Box(c).Width(6).Height(6).Radius(3).Background(tk.Error)
+				}
 				if ui.Text(c, "×").FontSize(13).TextColor(tk.TextTertiary).Cursor(ui.CursorPointer).Clicked() {
 					a.closeSession(sess.id)
 				}
@@ -193,8 +225,14 @@ func (a *app) connect(p profiles.Profile, s appui.Secret) {
 		id := fmt.Sprintf("%s-%d", p.ID, a.seq)
 		a.connMu.Unlock()
 		ss := &session{id: id, profile: p, secret: s, conn: conn}
+		ss.watcher = appui.NewTriggerWatcher(func(matched string) { a.triggerHit(id, matched) })
+		ss.trigV = appui.NewTriggerView(ss.watcher)
+		var tconn io.ReadWriteCloser = sess
+		if ss.watcher.HasPatterns() {
+			tconn = scanConn{ReadWriteCloser: sess, w: ss.watcher}
+		}
 		term, err := terminal.New(terminal.Options{
-			Conn:        sess,
+			Conn:        tconn,
 			OptionAsAlt: true,
 			OnTitle:     func(title string) { a.win.SetTitle(title) },
 			OnExit:      func(int) { a.sessionEnded(id) },
@@ -210,6 +248,7 @@ func (a *app) connect(p profiles.Profile, s appui.Secret) {
 			Profile:  p,
 			Term:     term,
 			Snippets: appui.NewSnippetView(),
+			Triggers: ss.trigV,
 			Back:     func() { a.leaveSession(id) },
 			ToFiles:  func() { a.filesPage(id) },
 			Tunnels:  func() { ss.tunnelV.Open() },
@@ -292,6 +331,9 @@ func (a *app) showSession(id string) {
 	a.connMu.Unlock()
 	if !ok {
 		return
+	}
+	if ss.watcher != nil {
+		ss.watcher.Clear() // 看过了,红点消掉
 	}
 	a.win.Update(func() {
 		if ss.filesPg != nil && a.hub.Now == appui.Files {
@@ -377,8 +419,12 @@ func (a *app) reconnect(ss *session) bool {
 		conn.Close()
 		return false
 	}
+	var tconn io.ReadWriteCloser = sess
+	if ss.watcher.HasPatterns() {
+		tconn = scanConn{ReadWriteCloser: sess, w: ss.watcher}
+	}
 	term, err := terminal.New(terminal.Options{
-		Conn:        sess,
+		Conn:        tconn,
 		OptionAsAlt: true,
 		OnTitle:     func(title string) { a.win.SetTitle(title) },
 		OnExit:      func(int) { a.sessionEnded(ss.id) },
@@ -394,6 +440,7 @@ func (a *app) reconnect(ss *session) bool {
 		Profile:  ss.profile,
 		Term:     term,
 		Snippets: appui.NewSnippetView(),
+		Triggers: ss.trigV,
 		Back:     func() { a.leaveSession(ss.id) },
 		ToFiles:  func() { a.filesPage(ss.id) },
 		Tunnels:  func() { ss.tunnelV.Open() },
@@ -408,6 +455,24 @@ func (a *app) reconnect(ss *session) bool {
 		a.hub.Now = appui.Session
 	})
 	return true
+}
+
+// triggerHit runs when the watcher's pattern matches session id's
+// output: it flashes the window and marks the tab, which showing the
+// session clears.
+func (a *app) triggerHit(id, matched string) {
+	a.connMu.Lock()
+	_, ok := a.sess[id]
+	active := a.active == id
+	a.connMu.Unlock()
+	if !ok || active {
+		return // 正看着的会话不用提醒
+	}
+	a.win.FlashFrame(true)
+	a.win.Update(func() {
+		a.win.FlashFrame(false)
+	})
+	// watcher.fired 已经在 Scan 里立了;让 UI 刷出红点靠 Update。
 }
 
 // closeSession frees one session's parts and shows what is left.
