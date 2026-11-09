@@ -237,7 +237,21 @@ func Connect(conf Config) (*Client, error) {
 		closer.Close()
 		return nil, fmt.Errorf("connect %s@%s:%s: %w", conf.User, conf.Host, conf.Port, err)
 	}
-	return &Client{ssh: ssh.NewClient(sshConn, chans, reqs), closer: closer, Conf: conf}, nil
+	client := &Client{ssh: ssh.NewClient(sshConn, chans, reqs), closer: closer, Conf: conf}
+	go client.keepalive(30 * time.Second)
+	return client, nil
+}
+
+// keepalive pings the server on an interval so idle connections stay
+// up through NATs and firewalls. It stops when the connection does.
+func (c *Client) keepalive(every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for range t.C {
+		if _, _, err := c.ssh.SendRequest("keepalive@lume", true, nil); err != nil {
+			return // 连接死了,退出循环
+		}
+	}
 }
 
 // Close ends the connection and everything on it, the jump host's too.

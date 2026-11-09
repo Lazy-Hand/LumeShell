@@ -26,6 +26,8 @@ import (
 type session struct {
 	id      string // profile ID + seq, the tab's key
 	profile profiles.Profile
+	secret  appui.Secret // 内存里,断开自动重连用;不入盘
+	ending  bool         // 用户主动断开时置真,sessionEnded 不再重连
 	conn    *sshclient.Client
 	term    *terminal.Terminal
 	termPg  *appui.TermPage
@@ -190,7 +192,7 @@ func (a *app) connect(p profiles.Profile, s appui.Secret) {
 		a.seq++
 		id := fmt.Sprintf("%s-%d", p.ID, a.seq)
 		a.connMu.Unlock()
-		ss := &session{id: id, profile: p, conn: conn}
+		ss := &session{id: id, profile: p, secret: s, conn: conn}
 		term, err := terminal.New(terminal.Options{
 			Conn:        sess,
 			OptionAsAlt: true,
@@ -309,31 +311,101 @@ func (a *app) failConnect(why string) {
 	})
 }
 
-// leaveSession closes the tab's session and picks what shows next:
-// another open session, or the host list.
+// leaveSession closes the tab's session at the user's hand: it marks
+// the session ending first, so sessionEnded won't try to reconnect.
 func (a *app) leaveSession(id string) {
+	a.connMu.Lock()
+	if ss, ok := a.sess[id]; ok {
+		ss.ending = true
+	}
+	a.connMu.Unlock()
 	a.closeSession(id)
 }
 
-// sessionEnded runs when the terminal reports the connection's end.
+// sessionEnded runs when the terminal reports the connection's end:
+// it tries to bring the session back once, and only drops the tab if
+// the reconnect fails.
 func (a *app) sessionEnded(id string) {
 	a.connMu.Lock()
 	ss, ok := a.sess[id]
 	wasActive := a.active == id
+	ending := ok && ss.ending
 	a.connMu.Unlock()
-	if !ok {
+	if !ok || ending {
 		return
 	}
-	a.win.Update(func() {
-		mygo.Dialog.Message(mygo.MessageOptions{
-			Title:   "连接已断开",
-			Message: ss.profile.Title() + " 的会话已结束",
+	// 断开的不是自己点的:先重连一次,成功就不打扰。
+	go func() {
+		if a.reconnect(ss) {
+			return
+		}
+		a.win.Update(func() {
+			mygo.Dialog.Message(mygo.MessageOptions{
+				Title:   "连接已断开",
+				Message: ss.profile.Title() + " 的会话已结束",
+			})
 		})
-	})
-	a.closeSession(id)
-	if wasActive {
-		a.win.Update(func() { a.win.SetTitle("Lume") })
+		a.closeSession(id)
+		if wasActive {
+			a.win.Update(func() { a.win.SetTitle("Lume") })
+		}
+	}()
+}
+
+// reconnect brings a dead session back: same profile, same secret, a
+// fresh connection and terminal swapped into the same tab. It reports
+// whether the session is live again.
+func (a *app) reconnect(ss *session) bool {
+	auth, err := authOf(ss.profile, ss.secret)
+	if err != nil {
+		return false
 	}
+	conf := sshclient.Config{Host: ss.profile.Host, Port: ss.profile.Port, User: ss.profile.User, Auth: auth}
+	if ss.profile.JumpHost != "" {
+		conf.Jump = &sshclient.Jump{
+			Host: ss.profile.JumpHost, Port: ss.profile.JumpPort,
+			User: ss.profile.JumpUser, Auth: auth,
+		}
+	}
+	conn, err := sshclient.Connect(conf)
+	if err != nil {
+		return false
+	}
+	sess, err := conn.Shell(80, 24)
+	if err != nil {
+		conn.Close()
+		return false
+	}
+	term, err := terminal.New(terminal.Options{
+		Conn:        sess,
+		OptionAsAlt: true,
+		OnTitle:     func(title string) { a.win.SetTitle(title) },
+		OnExit:      func(int) { a.sessionEnded(ss.id) },
+	})
+	if err != nil {
+		sess.Close()
+		conn.Close()
+		return false
+	}
+	ss.conn, ss.term = conn, term
+	ss.tunnelV = appui.NewTunnelView(conn)
+	ss.termPg = &appui.TermPage{
+		Profile: ss.profile,
+		Term:    term,
+		Back:    func() { a.leaveSession(ss.id) },
+		ToFiles: func() { a.filesPage(ss.id) },
+		Tunnels: func() { ss.tunnelV.Open() },
+	}
+	ss.filesPg, ss.panel = nil, nil // 旧 SFTP 随旧连接走了
+	a.connMu.Lock()
+	a.sess[ss.id] = ss
+	a.connMu.Unlock()
+	a.win.Update(func() {
+		a.hub.Term = ss.termPg
+		a.hub.Tunnels = ss.tunnelV
+		a.hub.Now = appui.Session
+	})
+	return true
 }
 
 // closeSession frees one session's parts and shows what is left.
