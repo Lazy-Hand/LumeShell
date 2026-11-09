@@ -7,7 +7,6 @@ package filepanel
 import (
 	"fmt"
 	"path"
-	"sort"
 	"sync"
 
 	"lume/internal/sshclient"
@@ -32,6 +31,8 @@ type Panel struct {
 	loading   map[string]bool // a ReadDir is up for a dir
 	err       error           // the last listing's failure
 	newDir    string          // the name typed for a directory to make
+	other     *Panel          // the column across, taking what this sends
+	onChanged func()          // how this column redraws itself
 }
 
 // New makes a panel over the file channel.
@@ -96,12 +97,7 @@ func (p *Panel) Open(dir string, changed func()) {
 			p.err = err
 			p.Unlock()
 		} else {
-			sort.Slice(entries, func(i, j int) bool {
-				if entries[i].IsDir != entries[j].IsDir {
-					return entries[i].IsDir
-				}
-				return entries[i].Name < entries[j].Name
-			})
+			sortEntries(entries)
 			p.dir, p.entries, p.err = dir, entries, nil
 			p.Unlock()
 		}

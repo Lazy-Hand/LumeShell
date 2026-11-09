@@ -8,32 +8,32 @@ import (
 	"lume/internal/profiles"
 )
 
-// Page is what the window shows: the list of hosts, or the terminal of
-// the connection made.
+// Page is what the window shows: the list of hosts, the terminal of the
+// connection made, or the two-column file browser over the same
+// connection.
 type Page int
 
 // The pages.
 const (
 	// Home is the list of saved hosts.
 	Home Page = iota
-	// Session is one connected host: its terminal and its files.
+	// Session is one connected host's terminal.
 	Session
+	// Files is the two-column file browser: local left, remote right.
+	Files
 )
 
-// TermPage is the session's page: the terminal on the left and the
-// host's files on the right, split by a divider the user drags.
+// TermPage is the terminal of one connected host. The file browser is
+// its own page: the terminal works without SFTP, and SFTP fails without
+// taking the session with it.
 type TermPage struct {
 	Profile profiles.Profile
 	Term    *terminal.Terminal
-	Files   *filepanel.Panel
-	// SplitWidth is the file panel's width, what the divider keeps.
-	SplitWidth float32
-	// Open says the file panel shows; the toolbar's button turns it off
-	// and on. It starts as it is set.
-	Open bool
 
-	// Back runs when the user leaves the session.
-	Back func()
+	// Back runs when the user leaves the terminal; ToFiles opens the
+	// file browser over the same connection.
+	Back    func()
+	ToFiles func()
 }
 
 // View builds the page.
@@ -48,19 +48,47 @@ func (p *TermPage) View(c *ui.Context) {
 				ui.Text(c, p.Profile.Title()).Bold()
 				ui.Text(c, p.Profile.Endpoint()).FontSize(11).TextColor(t.TextMuted)
 			})
-			if ui.Button(c, "文件").Clicked() {
-				p.Open = !p.Open
+			if ui.Button(c, "文件").Clicked() && p.ToFiles != nil {
+				p.ToFiles()
 			}
 		})
-		if p.Open && p.Files != nil {
-			ui.Split(c, &p.SplitWidth, func() {
-				terminal.View(c, p.Term).Fill().AutoFocus()
-			}, func() {
-				filepanel.View(c, p.Files, nil)
-			}).Fill().Grow(1)
-		} else {
-			terminal.View(c, p.Term).Fill().AutoFocus()
-		}
+		terminal.View(c, p.Term).Fill().AutoFocus()
+	})
+}
+
+// FilesPage is the two-column file browser over one connection: the
+// local machine's files on the left, the server's on the right. Each
+// side browses on its own; whose 出发 the transfer the middle tells.
+type FilesPage struct {
+	Profile  profiles.Profile
+	Remote   *filepanel.Panel // the server's files
+	Local    *filepanel.Panel // this machine's files
+	SideWidth float32          // the local column's width
+	Closed   bool             // the middle's 收起, one column each side
+
+	// Back runs when the user leaves the browser; Upload and Download
+	// run with a local path and the remote panel's directory.
+	Back func()
+}
+
+// View builds the page.
+func (p *FilesPage) View(c *ui.Context) {
+	t := c.Theme()
+	ui.Column(c).Fill().Children(func() {
+		ui.Row(c).Gap(10).Padding(10, 14).AlignItems(ui.Center).Background(t.Surface).Children(func() {
+			if ui.Button(c, "返回").Clicked() && p.Back != nil {
+				p.Back()
+			}
+			ui.Column(c).Gap(2).Grow(1).Children(func() {
+				ui.Text(c, p.Profile.Title()+" 的文件").Bold()
+				ui.Text(c, p.Profile.Endpoint()).FontSize(11).TextColor(t.TextMuted)
+			})
+		})
+		ui.Split(c, &p.SideWidth, func() {
+			filepanel.View(c, p.Local, nil)
+		}, func() {
+			filepanel.View(c, p.Remote, nil)
+		}).Fill().Grow(1)
 	})
 }
 
@@ -68,6 +96,7 @@ func (p *TermPage) View(c *ui.Context) {
 type Hub struct {
 	List  *List
 	Term  *TermPage
+	Files *FilesPage
 	Now   Page
 	Win   *mygo.Window
 	Store *profiles.Store
@@ -79,6 +108,10 @@ func (h *Hub) View(c *ui.Context) {
 	case Session:
 		if h.Term != nil {
 			h.Term.View(c)
+		}
+	case Files:
+		if h.Files != nil {
+			h.Files.View(c)
 		}
 	default:
 		if h.List != nil {

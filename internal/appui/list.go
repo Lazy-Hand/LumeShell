@@ -39,9 +39,11 @@ type List struct {
 		password string
 		keyPath  string
 		passphr  string
-		choosing bool // a file dialog is up
+		choosing bool   // a file dialog is up
+		editing  string // the profile being connected, empty for a new one
 	}
-	err string // the form's error, from its last connect attempt
+	err     string // the form's error, from its last connect attempt
+	cardErr string // what the last connect attempt failed with, for the cards
 }
 
 // Secret is what the form gathered to prove the user's identity.
@@ -62,6 +64,9 @@ func NewList(store *profiles.Store) *List {
 // ShowHome returns the list page to its cards.
 func (l *List) ShowHome() { l.form.open = false }
 
+// FailedCard reports why a connect attempt failed, beside the cards.
+func (l *List) FailedCard(why string) { l.cardErr = why }
+
 // View builds the page.
 func (l *List) View(c *ui.Context) {
 	t := c.Theme()
@@ -79,7 +84,9 @@ func (l *List) View(c *ui.Context) {
 }
 
 // cardsView shows the saved hosts, most recently used first, and the
-// button that opens the form.
+// button that opens the form. A card's 连接 never carries a secret:
+// secrets stay out of the store, so it fills the form with the host and
+// the user types the password or the key's passphrase there.
 func (l *List) cardsView(c *ui.Context) {
 	t := c.Theme()
 	ps := l.store.List()
@@ -89,7 +96,15 @@ func (l *List) cardsView(c *ui.Context) {
 		})
 	}
 	if ui.PrimaryButton(c, "新建连接").Clicked() {
-		l.form.open = true
+		l.editForm(profiles.Profile{}, false)
+	}
+	if l.cardErr != "" {
+		ui.Row(c).FillWidth().Width(560).Gap(10).Padding(10, 12).Background(t.Surface).Radius(t.Radius).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "⚠ "+l.cardErr).FontSize(13).TextColor(t.Danger).Grow(1)
+			if ui.Button(c, "知道了").Clicked() {
+				l.cardErr = ""
+			}
+		})
 	}
 	ui.Column(c).Gap(12).FillWidth().Width(560).Children(func() {
 		for _, p := range ps {
@@ -98,21 +113,21 @@ func (l *List) cardsView(c *ui.Context) {
 				ui.Column(c).Grow(1).Gap(4).Children(func() {
 					ui.Text(c, profile.Title()).Bold()
 					ui.Text(c, profile.Endpoint()).FontSize(12).TextColor(t.TextMuted)
-					sub := "密码（每次输入）"
+					sub := ""
 					switch {
 					case profile.Auth == profiles.Key:
 						sub = "私钥 " + profile.KeyPath
 						if profile.HasPass {
 							sub += "（加密）"
 						}
-					case profile.HasPass:
-						sub = "密码（每次输入）"
+					default:
+						sub = "密码登录"
 					}
 					ui.Text(c, sub).FontSize(12).TextColor(t.TextMuted)
 				})
 				if ui.Button(c, "连接").Clicked() {
-					secret := Secret{} // 已存主机不带密语;终端页可再要。
-					l.Connect(profile, secret)
+					l.cardErr = ""
+					l.editForm(profile, true)
 				}
 				if ui.Button(c, "删除").Clicked() {
 					l.Delete(profile)
@@ -120,6 +135,30 @@ func (l *List) cardsView(c *ui.Context) {
 			})
 		}
 	})
+}
+
+// editForm opens the form: filled from p when it connects a saved host
+// (fresh says so), or empty for a new one.
+func (l *List) editForm(p profiles.Profile, fresh bool) {
+	f := &l.form
+	f.open = true
+	f.editing = p.ID
+	f.label = p.Label
+	f.host = p.Host
+	f.port = p.Port
+	f.user = p.User
+	if !fresh {
+		f.label, f.host, f.port, f.user = "", "", "", ""
+	}
+	switch {
+	case p.Auth == profiles.Key:
+		f.auth = 1
+		f.keyPath = p.KeyPath
+	default:
+		f.auth = 0
+		f.keyPath = ""
+	}
+	f.password, f.passphr = "", ""
 }
 
 // formView is the new connection form.
@@ -152,11 +191,11 @@ func (l *List) formView(c *ui.Context) {
 			ui.Segmented(c, &f.auth, "密码", "私钥")
 		})
 		if f.auth == 0 { // 密码
-			ui.Field(c, "密码", func() {
+			ui.Field(c, "登录密码", func() {
 				ui.TextInput(c, &f.password).Password().Placeholder("登录密码")
 			})
 		} else {
-		ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
+			ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
 				if ui.Button(c, "选择私钥文件…").Clicked() {
 					l.pickKey()
 				}
@@ -186,6 +225,7 @@ func (l *List) formView(c *ui.Context) {
 					keyPath = f.keyPath
 				}
 				p := profiles.Profile{
+					ID:      f.editing, // 连接已存主机时保持它,不挤出新条目
 					Label:   f.label,
 					Host:    f.host,
 					Port:    f.port,

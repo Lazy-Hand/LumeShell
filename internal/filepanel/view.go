@@ -2,18 +2,19 @@ package filepanel
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
 
-// base is the last part of a local path.
-func base(local string) string { return filepath.Base(local) }
+// base is the last part of a path.
+func base(p string) string { return filepath.Base(p) }
 
-// View builds the panel: its toolbar, its listing and its errors. It
-// reads `changed` out of wherever the panel lives, which redraws it with
-// what the background goroutines bring in.
+// View builds one column of the file browser: its toolbar, its listing
+// and its errors. `changed` redraws it with what the background
+// goroutines bring in.
 func View(c *ui.Context, p *Panel, changed func()) {
 	if p == nil {
 		return
@@ -65,8 +66,8 @@ func View(c *ui.Context, p *Panel, changed func()) {
 								p.Visit(name, changed)
 							}
 						}
-						if ui.Button(c, "⬇").Clicked() && !isDir {
-							p.askDownload(name)
+						if ui.Button(c, "→").Clicked() && !isDir {
+							p.sendOut(name)
 						}
 						if ui.Button(c, "✕").Clicked() {
 							p.Remove(name, changed, plistSay)
@@ -84,9 +85,6 @@ func View(c *ui.Context, p *Panel, changed func()) {
 					p.Mkdir(name, changed, plistSay)
 				}
 			}
-			if ui.Button(c, "上传文件…").Clicked() {
-				p.askUpload()
-			}
 		})
 	})
 }
@@ -103,29 +101,52 @@ func size(n int64) string {
 	return fmt.Sprintf("%d B", n)
 }
 
-// askDownload picks where the file goes locally, then starts the copy.
-func (p *Panel) askDownload(name string) {
+// sendOut hands a file of this column to the other side: the browser
+// wires other as the column across, whose directory takes the file.
+func (p *Panel) sendOut(name string) {
+	p.Lock()
+	other := p.other
+	dir := p.dir
+	p.Unlock()
+	if other == nil {
+		// 单列面板:退回到保存对话框选址。
+		go func() {
+			dest, err := mygo.Dialog.Save(mygo.SaveDialogOptions{Title: "保存 " + name, DefaultPath: name})
+			if err != nil || dest == "" {
+				return
+			}
+			if err := p.fs.Download(join(dir, name), dest); err != nil {
+				plistSay("传输失败", err.Error())
+			}
+		}()
+		return
+	}
+	dest := join(other.Dir(), name)
 	go func() {
-		local, err := mygo.Dialog.Save(mygo.SaveDialogOptions{Title: "下载 " + name, DefaultPath: name})
-		if err != nil || local == "" {
+		if err := p.fs.Download(join(dir, name), dest); err != nil {
+			plistSay("传输失败", name+": "+err.Error())
 			return
 		}
-		p.Download(name, local, plistSay)
+		other.kick()
 	}()
 }
 
-// askUpload picks files from the host machine, then copies them into
-// the directory shown.
-func (p *Panel) askUpload() {
-	go func() {
-		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Title: "上传文件", Multiple: true})
-		if err != nil || len(paths) == 0 {
-			return
-		}
-		for _, local := range paths {
-			p.Upload(base(local), local, plistSay)
-		}
-	}()
+// kick refreshes the column's listing, for a transfer landing in it.
+func (p *Panel) kick() {
+	p.Lock()
+	changed := p.onChanged
+	p.Unlock()
+	if changed != nil {
+		changed()
+	}
+}
+
+// SetOther wires `other` as the column this one sends files to, and
+// changed as how this column redraws itself.
+func (p *Panel) SetOther(other *Panel, changed func()) {
+	p.Lock()
+	p.other, p.onChanged = other, changed
+	p.Unlock()
 }
 
 // plistSay is how the panel reports transfer failures: mygo.Dialog
@@ -133,3 +154,16 @@ func (p *Panel) askUpload() {
 func plistSay(title, body string) {
 	mygo.Dialog.Message(mygo.MessageOptions{Type: mygo.MessageWarning, Title: title, Message: body})
 }
+
+// dropAsk picks files from this machine, used by the local column's
+// tests only; the browser sends with the 中 button instead.
+func dropAsk() []string {
+	paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Title: "选择文件"})
+	if err != nil {
+		return nil
+	}
+	return paths
+}
+
+// stat says whether a path exists, for tests and wiring.
+func stat(p string) (os.FileInfo, error) { return os.Stat(p) }

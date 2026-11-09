@@ -49,11 +49,38 @@ func TestCardsShowSavedHosts(t *testing.T) {
 	if !tt.HasText("example.com") || !tt.HasText("root@example.com:22") {
 		t.Errorf("texts %q lack the host", tt.Texts())
 	}
+	// 卡片的连接进表单:密语不入盘,卡片带不了它。
+	if err := tt.Click("连接"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Click("登录密码"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Type("secret")
 	if err := tt.Click("连接"); err != nil {
 		t.Fatal(err)
 	}
 	if len(spy.profiles) != 1 || spy.profiles[0].Host != "example.com" {
 		t.Errorf("Connect ran %+v, want the saved profile", spy.profiles)
+	}
+	if len(spy.secrets) != 1 || spy.secrets[0].Password != "secret" {
+		t.Errorf("secrets = %+v, want the typed password", spy.secrets)
+	}
+}
+
+func TestCardErrorShowsWithoutDialog(t *testing.T) {
+	l, s, _ := newList(t)
+	s.Save(profiles.Profile{Host: "h", User: "u", Auth: profiles.Password})
+	l.FailedCard("connect h:22: refused")
+	tt := uiTester(l.View)
+	if !tt.HasText("connect h:22: refused") {
+		t.Errorf("texts %q lack the failure", tt.Texts())
+	}
+	if err := tt.Click("知道了"); err != nil {
+		t.Fatal(err)
+	}
+	if tt.HasText("connect h:22: refused") {
+		t.Error("the failure stayed after dismiss")
 	}
 }
 

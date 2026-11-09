@@ -35,6 +35,32 @@ type app struct {
 	conn   *sshclient.Client
 	term   *terminal.Terminal
 	panel  *filepanel.Panel
+
+	dial dialGuard
+}
+
+// dialGuard takes one connect attempt at a time: a second click while a
+// dial is up does nothing, rather than piling a second session's
+// dialogs and timeouts on the first's.
+type dialGuard struct {
+	mu sync.Mutex
+	up bool
+}
+
+func (g *dialGuard) try() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.up {
+		return false
+	}
+	g.up = true
+	return true
+}
+
+func (g *dialGuard) done() {
+	g.mu.Lock()
+	g.up = false
+	g.mu.Unlock()
 }
 
 func main() {
@@ -77,10 +103,14 @@ func (a *app) view(c *ui.Context) { a.hub.View(c) }
 
 // connect starts a session with the profile and secret the list page
 // gave. The dial runs off the UI, and the terminal comes up when the
-// connection is there. The file panel rides the same connection; when
-// the host has no SFTP (rare), the terminal alone comes up.
+// connection is there. 文件浏览是另一页、另一条通道:它连不上不影响
+// 终端,从终端页的工具条进。
 func (a *app) connect(p profiles.Profile, s appui.Secret) {
+	if !a.dial.try() {
+		return // 一次只有一次拨号;重复的点击忽略。
+	}
 	go func() {
+		defer a.dial.done()
 		auth, err := authOf(p, s)
 		var conn *sshclient.Client
 		if err == nil {
@@ -103,16 +133,6 @@ func (a *app) connect(p profiles.Profile, s appui.Secret) {
 			fail(err)
 			return
 		}
-		changed := func() { a.win.Update(func() {}) }
-		var panel *filepanel.Panel
-		if fs, err := conn.SFTP(); err == nil {
-			home, err := fs.Home()
-			if err != nil {
-				home = "/"
-			}
-			panel = filepanel.New(fs, home)
-			panel.Open(home, changed)
-		}
 		term, err := terminal.New(terminal.Options{
 			Conn:        sess,
 			OptionAsAlt: true,
@@ -125,14 +145,12 @@ func (a *app) connect(p profiles.Profile, s appui.Secret) {
 			return
 		}
 		a.connMu.Lock()
-		a.conn, a.term, a.panel = conn, term, panel
+		a.conn, a.term = conn, term
 		page := &appui.TermPage{
-			Profile:    p,
-			Term:       term,
-			Files:      panel,
-			Open:       panel != nil,
-			SplitWidth: 280,
-			Back:       func() { a.leaveSession() },
+			Profile: p,
+			Term:    term,
+			Back:    func() { a.leaveSession() },
+			ToFiles: func() { a.filesPage(p) },
 		}
 		a.connMu.Unlock()
 		a.win.Update(func() {
@@ -142,14 +160,68 @@ func (a *app) connect(p profiles.Profile, s appui.Secret) {
 	}()
 }
 
-// failConnect reports why a session did not come up, and returns to the
-// list.
+// filesPage 起文件浏览器:左列本机文件,右列服务器文件,各自独立
+// 的目录与列表。SFTP 起不来时只报错,终端不会被它带走。
+func (a *app) filesPage(p profiles.Profile) {
+	a.connMu.Lock()
+	conn := a.conn
+	a.connMu.Unlock()
+	if conn == nil {
+		return
+	}
+	if a.hub.Files != nil && a.hub.Now == appui.Files {
+		a.win.Update(func() { a.hub.Now = appui.Files })
+		return
+	}
+	go func() {
+		fs, err := conn.SFTP()
+		if err != nil {
+			a.win.Update(func() { a.list.FailedCard("文件服务不可用:" + appui.ErrorText(err)) })
+			return
+		}
+		home, err := fs.Home()
+		if err != nil {
+			home = "/"
+		}
+		changed := func() { a.win.Update(func() {}) }
+		remote := filepanel.New(fs, home)
+		localDir := filepanel.LocalHome()
+		local := filepanel.New(filepanel.LocalFS{}, localDir)
+		remote.SetOther(local, nil)
+		local.SetOther(remote, nil)
+		remote.Open(home, changed)
+		local.Open(localDir, changed)
+		a.connMu.Lock()
+		page := &appui.FilesPage{
+			Profile:   p,
+			Remote:    remote,
+			Local:     local,
+			SideWidth: 420,
+			Back:      func() { a.toTerminal() },
+		}
+		a.connMu.Unlock()
+		a.win.Update(func() {
+			a.hub.Files = page
+			a.hub.Now = appui.Files
+		})
+	}()
+}
+
+// toTerminal returns from the file browser to the terminal of the same
+// session.
+func (a *app) toTerminal() {
+	a.win.Update(func() { a.hub.Now = appui.Session })
+}
+
+// failConnect reports why a session did not come up, beside the cards
+// of the list. A modal dialog here would hang over a session that
+// connects later, so the failure stays in the page.
 func (a *app) failConnect(why string) {
 	a.win.Update(func() {
+		a.list.FailedCard(why)
 		a.list.ShowHome()
 		a.hub.Now = appui.Home
 	})
-	mygo.Dialog.Error("连接失败", why)
 }
 
 // leaveSession tears the session down and goes back to the list, as the
