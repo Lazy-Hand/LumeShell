@@ -247,8 +247,12 @@ func (p *Panel) DoRename(changed func()) {
 	go func() {
 		if err := p.Rename(from, to); err != nil {
 			plistSay(fmt.Sprintf("重命名 %s 失败", from), err.Error())
+			if changed != nil {
+				changed()
+			}
+			return
 		}
-		changed()
+		p.Open(p.dir, changed)
 	}()
 }
 
@@ -261,7 +265,7 @@ func (p *Panel) Parent(changed func()) {
 }
 
 // Mkdir makes the staged directory in the one shown, in the background,
-// and reports how it went.
+// reports how it went, and reloads the listing.
 func (p *Panel) Mkdir(changed func()) {
 	p.Lock()
 	name := p.newDir
@@ -273,18 +277,27 @@ func (p *Panel) Mkdir(changed func()) {
 	go func() {
 		if err := p.fs.Mkdir(join(p.dir, name)); err != nil {
 			plistSay("新建目录失败", err.Error())
+			if changed != nil {
+				changed()
+			}
+			return
 		}
-		changed()
+		p.Open(p.dir, changed)
 	}()
 }
 
-// Remove deletes the entry of the listing named, file or empty dir.
+// Remove deletes the entry of the listing named, file or empty dir,
+// and reloads the listing once it is gone.
 func (p *Panel) Remove(name string, changed func(), say func(title, body string)) {
 	go func() {
 		if err := p.fs.Remove(join(p.dir, name)); err != nil {
 			say(fmt.Sprintf("删除 %s 失败", name), err.Error())
+			if changed != nil {
+				changed()
+			}
+			return
 		}
-		changed()
+		p.Open(p.dir, changed)
 	}()
 }
 
@@ -328,8 +341,11 @@ func (p *Panel) takeIn(srcPanel *Panel, name string) {
 		p.Unlock()
 		if err != nil {
 			plistSay("传输失败", name+": "+err.Error())
+			p.kick()
+			return
 		}
-		p.kick()
+		// 传完了刷新本列的列表,进度条留到下一次操作清掉。
+		p.Open(p.dir, changed)
 	}()
 }
 
