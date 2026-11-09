@@ -126,18 +126,16 @@ func entryView(c *ui.Context, p *Panel, e sshclient.Entry, changed func(), tk *t
 		Cursor(ui.CursorPointer).Transition(ui.ElementTransition{
 		Duration: 120 * time.Millisecond, Ease: ui.CubicBezier(0.32, 0.72, 0, 1), Colors: true,
 	})
-	if !e.IsDir {
-		row.Drag(dragItem{from: p, name: e.Name})
-		p.takeDrop(row)
-		if _, over := ui.DragOver[dragItem](row); over {
-			row.Background(tk.FillTertiary)
-		}
+	row.Drag(dragItem{from: p, name: e.Name, isDir: e.IsDir})
+	p.takeDrop(row)
+	if _, over := ui.DragOver[dragItem](row); over {
+		row.Background(tk.FillTertiary)
 	}
 	switch overlay.ContextMenu(c, row, overlay.DropdownMenuProps{Items: rowItems(e)}) {
 	case "enter":
 		p.Visit(e.Name, changed)
 	case "send":
-		p.sendOut(e.Name)
+		p.sendOut(e.Name, e.IsDir)
 	case "rename":
 		p.openRename(e.Name)
 	case "remove":
@@ -246,15 +244,18 @@ func size(n int64) string {
 	return fmt.Sprintf("%d B", n)
 }
 
-// sendOut hands a file of this column to the other side: the browser
-// wires other as the column across, whose takeIn pulls the file with
-// progress. Single-column panels fall back to a save dialog.
-func (p *Panel) sendOut(name string) {
+// sendOut hands an entry of this column to the other side: files
+// stream with progress, directories recurse. Single-column panels
+// fall back to a save dialog for files.
+func (p *Panel) sendOut(name string, isDir bool) {
 	p.Lock()
 	other := p.other
 	dir := p.dir
 	p.Unlock()
 	if other == nil {
+		if isDir {
+			return // 单列面板不支持保存整目录
+		}
 		go func() {
 			dest, err := mygo.Dialog.Save(mygo.SaveDialogOptions{Title: "保存 " + name, DefaultPath: name})
 			if err != nil || dest == "" {
@@ -266,7 +267,7 @@ func (p *Panel) sendOut(name string) {
 		}()
 		return
 	}
-	other.takeIn(p, name)
+	other.takeIn(p, name, isDir)
 }
 
 // kick refreshes the column's listing, for a transfer landing in it.

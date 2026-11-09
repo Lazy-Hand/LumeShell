@@ -38,7 +38,7 @@ func TestTwoColumnTransfer(t *testing.T) {
 
 	// 左列把 send.txt 发去右列的目录:进度报告会先走几个 changed,
 	// 右列的 kick 收尾;等文件出现为止。
-	go local.sendOut("send.txt")
+	go local.sendOut("send.txt", false)
 	deadline := time.Now().Add(2 * time.Second)
 	var data []byte
 	for {
@@ -100,5 +100,37 @@ func TestSendWithoutOtherSavesToPick(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "a.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	p.sendOut("a.txt") // 弹窗在别的 goroutine 起;测试不点它。
+	p.sendOut("a.txt", false) // 弹窗在别的 goroutine 起;测试不点它。
+}
+
+func TestDirectoryTransfer(t *testing.T) {
+	homeL := t.TempDir()
+	homeR := t.TempDir()
+	// 左列备一棵两层目录。
+	os.MkdirAll(filepath.Join(homeL, "proj/sub"), 0o755)
+	os.WriteFile(filepath.Join(homeL, "proj/a.txt"), []byte("a"), 0o644)
+	os.WriteFile(filepath.Join(homeL, "proj/sub/b.txt"), []byte("b"), 0o644)
+	local := New(LocalFS{}, homeL)
+	remote := New(&fakeFS{root: homeR}, homeR)
+	changed := make(chan struct{}, 32)
+	local.SetOther(remote, func() { changed <- struct{}{} })
+	remote.SetOther(local, func() { changed <- struct{}{} })
+	local.Open(homeL, func() { changed <- struct{}{} })
+	remote.Open(homeR, func() { changed <- struct{}{} })
+	waitBoth(t, changed, 2)
+
+	go local.sendOut("proj", true)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(homeR, "proj/sub/b.txt")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("directory contents did not arrive")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if data, _ := os.ReadFile(filepath.Join(homeR, "proj/a.txt")); string(data) != "a" {
+		t.Fatalf("a.txt = %q", data)
+	}
 }

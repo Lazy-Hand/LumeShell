@@ -128,11 +128,12 @@ type transfer struct {
 	err   string
 }
 
-// dragItem is what a file row's Drag carries: the panel it leaves and
-// the file's name, so the column it lands on can pull it across.
+// dragItem is what a row's Drag carries: the panel it leaves, the
+// entry's name, and whether it is a directory (目录走递归传输).
 type dragItem struct {
-	from *Panel
-	name string
+	from  *Panel
+	name  string
+	isDir bool
 }
 
 // Sends is the transfers in flight, in the order they started: the view
@@ -301,19 +302,26 @@ func (p *Panel) Remove(name string, changed func(), say func(title, body string)
 	}()
 }
 
-// takeIn pulls a file the other column sends into this one's directory:
-// the send runs on the source's channel with progress the view draws,
-// and the listing refreshes as it lands.
-func (p *Panel) takeIn(srcPanel *Panel, name string) {
+// takeIn pulls an entry the other column sends into this one's
+// directory: files stream with progress, directories recurse.
+func (p *Panel) takeIn(srcPanel *Panel, name string, isDir bool) {
+	if isDir {
+		p.takeDir(srcPanel, name)
+		return
+	}
+	p.takeFile(srcPanel, name, join(srcPanel.dir, name), join(p.dir, name))
+}
+
+// takeFile streams one file from srcPanel's dir into this one's.
+func (p *Panel) takeFile(srcPanel *Panel, name, src, dest string) {
 	srcPanel.Lock()
-	srcDir, srcFS := srcPanel.dir, srcPanel.fs
+	srcFS := srcPanel.fs
 	srcPanel.Unlock()
 	p.Lock()
 	p.sendSeq++
 	id := p.sendSeq
 	p.sends[id] = &transfer{name: name, total: -1}
 	changed := p.onChanged
-	dest := join(p.dir, name)
 	p.Unlock()
 	if changed != nil {
 		changed()
@@ -329,7 +337,7 @@ func (p *Panel) takeIn(srcPanel *Panel, name string) {
 				changed()
 			}
 		}
-		err := srcFS.Send(join(srcDir, name), dest, p.fs, report)
+		err := srcFS.Send(src, dest, p.fs, report)
 		p.Lock()
 		if t, ok := p.sends[id]; ok {
 			if err != nil {
@@ -344,9 +352,95 @@ func (p *Panel) takeIn(srcPanel *Panel, name string) {
 			p.kick()
 			return
 		}
-		// 传完了刷新本列的列表,进度条留到下一次操作清掉。
 		p.Open(p.dir, changed)
 	}()
+}
+
+// takeDir recurses a directory of the other column into this one: it
+// makes the dir here, then takes each child by its own kind. The top
+// dir's progress counts the files as they land.
+func (p *Panel) takeDir(srcPanel *Panel, name string) {
+	srcPanel.Lock()
+	srcFS, srcDir := srcPanel.fs, srcPanel.dir
+	srcPanel.Unlock()
+	dstDir := join(p.dir, name)
+	src := join(srcDir, name)
+	go func() {
+		// 先在目标建好目录,再一层层把子孙拉过来;任何一个失败
+		// 都记到整条传输上,能传多少传多少。
+		if err := p.fs.Mkdir(dstDir); err != nil {
+			plistSay("新建目录失败", dstDir+": "+err.Error())
+			p.kick()
+			return
+		}
+		p.Lock()
+		p.sendSeq++
+		id := p.sendSeq
+		p.sends[id] = &transfer{name: name + "/", total: -1}
+		changed := p.onChanged
+		p.Unlock()
+		if changed != nil {
+			changed()
+		}
+		p.walkDir(srcPanel, srcFS, src, dstDir, id, changed)
+		p.Lock()
+		if t, ok := p.sends[id]; ok && t.err == "" {
+			t.total = t.done // done 累计了文件数,total 跟着落地
+		}
+		p.Unlock()
+		p.Open(p.dir, changed)
+	}()
+}
+
+// walkDir copies the children of src (on srcFS) into dst (on p.fs),
+// counting each file into the transfer's done as it lands.
+func (p *Panel) walkDir(srcPanel *Panel, srcFS fileChan, src, dst string, id int, changed func()) {
+	ents, err := srcFS.ReadDir(src)
+	if err != nil {
+		p.Lock()
+		if t, ok := p.sends[id]; ok {
+			t.err = err.Error()
+		}
+		p.Unlock()
+		return
+	}
+	for _, e := range ents {
+		subSrc := join(src, e.Name)
+		subDst := join(dst, e.Name)
+		if e.IsDir {
+			if err := p.fs.Mkdir(subDst); err != nil {
+				p.Lock()
+				if t, ok := p.sends[id]; ok {
+					t.err = e.Name + ": " + err.Error()
+				}
+				p.Unlock()
+				continue
+			}
+			p.walkDir(srcPanel, srcFS, subSrc, subDst, id, changed)
+			continue
+		}
+		// 子文件复用 takeFile 的单条传输:名字记相对路径,不占新
+		// 条目;进度直接加进外层目录的 done。
+		err := srcFS.Send(subSrc, subDst, p.fs, func(done, total int64) {
+			p.Lock()
+			if t, ok := p.sends[id]; ok {
+				t.done++
+			}
+			p.Unlock()
+			if changed != nil {
+				changed()
+			}
+		})
+		p.Lock()
+		if t, ok := p.sends[id]; ok {
+			if err != nil {
+				t.err = e.Name + ": " + err.Error()
+			} else {
+				t.done++
+			}
+		}
+		p.Unlock()
+	}
 }
 
 // takeDrop pulls a file dragged from the other column into this one's
@@ -354,7 +448,7 @@ func (p *Panel) takeIn(srcPanel *Panel, name string) {
 // Directories stay on their side.
 func (p *Panel) takeDrop(e ui.Element) {
 	if d, ok := ui.Drop[dragItem](e); ok && d.from != nil && d.from != p {
-		d.from.sendOut(d.name)
+		d.from.sendOut(d.name, d.isDir)
 	}
 }
 
