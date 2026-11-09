@@ -3,6 +3,7 @@ package filepanel
 import (
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"lume/internal/sshclient"
 
@@ -120,7 +121,10 @@ func View(c *ui.Context, p *Panel, changed func()) {
 // entryView is one row of the listing: its icon, name and, for a file,
 // its size and time, with a right-click menu of what the row can do.
 func entryView(c *ui.Context, p *Panel, e sshclient.Entry, changed func(), tk *theme.Tokens) {
-	row := ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Padding(5, 8).Radius(tk.BorderRadiusSM)
+	row := ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Padding(5, 8).Radius(tk.BorderRadiusSM).
+		Cursor(ui.CursorPointer).Transition(ui.ElementTransition{
+		Duration: 120 * time.Millisecond, Ease: ui.CubicBezier(0.32, 0.72, 0, 1), Colors: true,
+	})
 	if !e.IsDir {
 		row.Drag(dragItem{from: p, name: e.Name})
 		p.takeDrop(row)
@@ -138,24 +142,30 @@ func entryView(c *ui.Context, p *Panel, e sshclient.Entry, changed func(), tk *t
 	case "remove":
 		p.Remove(e.Name, changed, plistSay)
 	}
+	// Hover 给一层浅底,按下再深一点;目录双击进入。
+	switch {
+	case row.Pressed():
+		row.Background(tk.FillSecondary)
+	case row.Hovered():
+		row.Background(tk.FillTertiary)
+	}
 	row.Children(func() {
 		glyph, color := lucide.File(), tk.TextTertiary
 		if e.IsDir {
 			glyph, color = lucide.Folder(), tk.Primary
 		}
-		if ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).MinWidth(0).Children(func() {
+		ui.Row(c).Gap(8).AlignItems(ui.Center).Grow(1).MinWidth(0).Children(func() {
 			ui.Icon(c, glyph).FontSize(15).TextColor(color)
 			ui.Text(c, e.Name).FontSize(13).Grow(1).SingleLine()
 			if !e.IsDir {
 				ui.Text(c, size(e.Size)).FontSize(11).TextColor(tk.TextTertiary)
 				ui.Text(c, e.Moded.Format("01-02 15:04")).FontSize(11).TextColor(tk.TextTertiary)
 			}
-		}).Clicked() {
-			if e.IsDir {
-				p.Visit(e.Name, changed)
-			}
-		}
+		})
 	})
+	if e.IsDir && row.DoubleClicked() {
+		p.Visit(e.Name, changed)
+	}
 }
 
 // rowItems is the context menu of one listing row: 进入 for a
