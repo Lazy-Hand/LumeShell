@@ -108,6 +108,7 @@ func View(c *ui.Context, p *Panel, changed func()) {
 						Status:   status,
 						ShowInfo: true,
 						Label:    label,
+						Format:   func(p float32) string { return fmt.Sprintf("%d%%", int(p+0.5)) },
 					})
 				}
 			})
