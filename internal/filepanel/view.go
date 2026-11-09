@@ -22,12 +22,16 @@ func base(p string) string { return filepath.Base(p) }
 
 // View builds one column of the file browser: its toolbar, its listing
 // and its errors. `changed` redraws it with what the background
-// goroutines bring in. The listing's rows and the blank space take
-// context menus: a row's 进入/发送到对列/重命名/删除, the blank's
-// 新建目录/刷新.
+// goroutines bring in; nil falls back to the panel's own onChanged,
+// which the two-column browser wires and single columns leave alone.
+// The listing's rows and the blank space take context menus: a row's
+// 进入/发送到对列/重命名/删除, the blank's 新建目录/刷新.
 func View(c *ui.Context, p *Panel, changed func()) {
 	if p == nil {
 		return
+	}
+	if changed == nil {
+		changed = p.kick
 	}
 	tk := theme.TokensOf(c)
 	root := ui.Column(c).Fill().Background(tk.BgLayout)
