@@ -36,15 +36,29 @@ func TestTwoColumnTransfer(t *testing.T) {
 	remote.Open(homeR, func() { changed <- struct{}{} })
 	waitBoth(t, changed, 2)
 
-	// 左列把 send.txt 发去右列的目录。
+	// 左列把 send.txt 发去右列的目录:进度报告会先走几个 changed,
+	// 右列的 kick 收尾;等文件出现为止。
 	go local.sendOut("send.txt")
-	waitBoth(t, changed, 1) // 右列的 kick 刷新
-	data, err := os.ReadFile(filepath.Join(homeR, "send.txt"))
-	if err != nil {
-		t.Fatalf("the file did not arrive: %v", err)
+	deadline := time.Now().Add(2 * time.Second)
+	var data []byte
+	for {
+		var err error
+		data, err = os.ReadFile(filepath.Join(homeR, "send.txt"))
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the file did not arrive: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if string(data) != "payload" {
 		t.Fatalf("arrived %q", data)
+	}
+	// 传输的进度条在右列:send.txt 的条目带着完成态。
+	sends := remote.Sends()
+	if len(sends) != 1 || sends[0].name != "send.txt" || sends[0].err != "" || sends[0].done != sends[0].total {
+		t.Fatalf("sends = %+v, want one finished send.txt", sends)
 	}
 }
 

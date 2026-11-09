@@ -1,6 +1,7 @@
 package filepanel
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,8 +53,55 @@ func (LocalFS) Download(src, dest string) error {
 	return os.WriteFile(dest, data, 0o644)
 }
 
-func (LocalFS) Upload(src, dest string) error { return LocalFS{}.Download(src, dest) }
-func (LocalFS) Close() error                  { return nil }
+// Send copies this channel's local file at src to the destination
+// channel's remote path: the source reads from disk, the destination
+// writes (local file or SFTP), and report hears the bytes as they go.
+func (LocalFS) Send(src, remote string, dst sshclient.WriterFor, report func(done, total int64)) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	st, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	var from io.Reader = in
+	if report != nil {
+		from = &reportReader{r: in, total: st.Size(), report: report}
+	}
+	out, err := dst.Create(remote)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, from); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// Create opens the local path for writing, as a Send destination.
+func (LocalFS) Create(path string) (io.WriteCloser, error) { return os.Create(path) }
+
+// reportReader reports how much of r has been read after each Read.
+type reportReader struct {
+	r      io.Reader
+	done   int64
+	total  int64
+	report func(done, total int64)
+}
+
+func (p *reportReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	p.done += int64(n)
+	if n > 0 {
+		p.report(p.done, p.total)
+	}
+	return n, err
+}
+
+func (LocalFS) Close() error { return nil }
 
 // LocalHome is where the local column starts: the user's home, with a
 // fallback per platform when the system does not say.

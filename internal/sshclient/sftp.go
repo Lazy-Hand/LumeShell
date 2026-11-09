@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
 )
 
 // Entry is one file or directory of the remote, as the panel shows it.
@@ -17,6 +16,12 @@ type Entry struct {
 	Mode  os.FileMode
 	Moded time.Time
 	IsDir bool
+}
+
+// WriterFor is the writing half of a file channel: local and remote
+// paths both open a stream this way, and Send's destination is one.
+type WriterFor interface {
+	Create(path string) (io.WriteCloser, error)
 }
 
 // SFTP is the connection's file access. It opens over the same SSH
@@ -111,23 +116,56 @@ func (fs *SFTP) get(remote, dest string) error {
 	return out.Close()
 }
 
-// Upload copies a local file to the remote path.
-func (fs *SFTP) Upload(local, remote string) error {
-	in, err := os.Open(local)
+// Send copies this channel's remote file at src into the destination
+// channel's writer at remote, streaming so progress reports as bytes
+// pass. The destination is the panel's other column (a second SFTP
+// channel or the local one), reached by the writerFor it serves.
+func (fs *SFTP) Send(src, remote string, dst WriterFor, report func(done, total int64)) error {
+	in, err := fs.cl.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := fs.cl.Create(remote)
+	st, err := in.Stat()
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
+	if st.IsDir() {
+		return fmt.Errorf("%s is a directory", src)
+	}
+	var from io.Reader = in
+	if report != nil {
+		from = &progressReader{r: in, total: st.Size(), report: report}
+	}
+	out, err := dst.Create(remote)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, from); err != nil {
 		out.Close()
-		return fmt.Errorf("upload %s: %w", local, err)
+		return fmt.Errorf("send %s: %w", src, err)
 	}
 	return out.Close()
 }
 
+// Create opens the remote path for writing, as a Send destination.
+func (fs *SFTP) Create(path string) (io.WriteCloser, error) { return fs.cl.Create(path) }
+
+// progressReader reports how much of r has been read after each Read.
+type progressReader struct {
+	r      io.Reader
+	done   int64
+	total  int64
+	report func(done, total int64)
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	p.done += int64(n)
+	if n > 0 {
+		p.report(p.done, p.total)
+	}
+	return n, err
+}
+
 // hand over the underlying client for the panel
-var _ = ssh.TerminalModes{}

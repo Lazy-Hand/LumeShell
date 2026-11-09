@@ -1,6 +1,7 @@
 package filepanel
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,12 +39,54 @@ func (f *fakeFS) ReadDir(dir string) ([]sshclient.Entry, error) {
 	return out, nil
 }
 
-func (f *fakeFS) Mkdir(dir string) error       { return os.Mkdir(dir, 0o755) }
-func (f *fakeFS) Remove(p string) error        { return os.Remove(p) }
-func (f *fakeFS) Rename(from, to string) error { return os.Rename(from, to) }
-func (f *fakeFS) Download(_, _ string) error   { return nil }
-func (f *fakeFS) Upload(_, _ string) error     { return nil }
-func (f *fakeFS) Close() error                 { return nil }
+func (f *fakeFS) Mkdir(dir string) error                     { return os.Mkdir(dir, 0o755) }
+func (f *fakeFS) Remove(p string) error                      { return os.Remove(p) }
+func (f *fakeFS) Rename(from, to string) error               { return os.Rename(from, to) }
+func (f *fakeFS) Create(path string) (io.WriteCloser, error) { return os.Create(path) }
+func (f *fakeFS) Close() error                               { return nil }
+
+// Send 流式复制本机文件到对面通道的 writer:测试里对面也是本机,进度
+// 随拷贝的字节报出。
+func (f *fakeFS) Send(src, remote string, dst sshclient.WriterFor, report func(done, total int64)) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	var total int64
+	if report != nil {
+		if st, err := in.Stat(); err == nil {
+			total = st.Size()
+		}
+	}
+	out, err := dst.Create(remote)
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, 32*1024)
+	var done int64
+	for {
+		n, rerr := in.Read(buf)
+		if n > 0 {
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				out.Close()
+				return werr
+			}
+			done += int64(n)
+			if report != nil {
+				report(done, total)
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			out.Close()
+			return rerr
+		}
+	}
+	return out.Close()
+}
 
 // newPanel is a panel over a fresh local tree, its listing not loaded.
 func newPanel(t *testing.T) (*Panel, string) {

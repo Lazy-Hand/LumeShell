@@ -10,16 +10,23 @@ import (
 	"sync"
 
 	"lume/internal/sshclient"
+
+	"github.com/egoist/mygo/ui"
 )
 
 // fileChan is what the panel needs of the connection's file channel.
+// Send is the one copy a transfer needs: the source channel streams its
+// file at src into a writer the destination channel makes at remote.
 type fileChan interface {
+	sshclient.WriterFor
 	ReadDir(dir string) ([]sshclient.Entry, error)
 	Mkdir(dir string) error
 	Remove(path string) error
 	Rename(from, to string) error
-	Download(remote, dest string) error
-	Upload(local, remote string) error
+	// Send copies this channel's file at src into dst's writer at
+	// remote; report hears done of total bytes as they go, nil for none.
+	// dst is the other column's channel, reached by its WriterFor.
+	Send(src, remote string, dst sshclient.WriterFor, report func(done, total int64)) error
 	Close() error
 }
 
@@ -29,13 +36,15 @@ type Panel struct {
 	fs        fileChan
 	dir       string
 	entries   []sshclient.Entry
-	loading   map[string]bool // a ReadDir is up for a dir
-	err       error           // the last listing's failure
-	newDir    string          // the name the new directory dialog takes
-	rename    string          // the name the rename dialog edits
-	renameTo  string          // what the rename dialog renamed it to
-	other     *Panel          // the column across, taking what this sends
-	onChanged func()          // how this column redraws itself
+	loading   map[string]bool   // a ReadDir is up for a dir
+	err       error             // the last listing's failure
+	newDir    string            // the name the new directory dialog takes
+	rename    string            // the name the rename dialog edits
+	renameTo  string            // what the rename dialog renamed it to
+	other     *Panel            // the column across, taking what this sends
+	onChanged func()            // how this column redraws itself
+	sendSeq   int               // the key of the next transfer
+	sends     map[int]*transfer // the transfers in flight, for the view
 
 	// 小对话框:新建目录、重命名。kind 说明它为什么开着,dlgValue
 	// 是它编辑的名字,dlgOpen 让 Modal 显示它。
@@ -104,8 +113,52 @@ func New(fs fileChan, home string) *Panel {
 		fs:      fs,
 		dir:     home,
 		loading: map[string]bool{},
+		sends:   map[int]*transfer{},
 	}
 	return p
+}
+
+// transfer is one send landing on a panel: its name, how much of it has
+// arrived, and the total, or a failure once it ends wrong. The view
+// draws one progress line for each.
+type transfer struct {
+	name  string
+	done  int64
+	total int64
+	err   string
+}
+
+// dragItem is what a file row's Drag carries: the panel it leaves and
+// the file's name, so the column it lands on can pull it across.
+type dragItem struct {
+	from *Panel
+	name string
+}
+
+// Sends is the transfers in flight, in the order they started: the view
+// draws one progress line for each. A finished one keeps a full bar, a
+// failed one its error, until the listing changes them away.
+func (p *Panel) Sends() []transfer {
+	p.Lock()
+	defer p.Unlock()
+	out := make([]transfer, 0, len(p.sends))
+	for i := 1; i <= p.sendSeq; i++ {
+		if t, ok := p.sends[i]; ok {
+			out = append(out, *t)
+		}
+	}
+	return out
+}
+
+// ClearSends drops the finished and failed transfers the view shows.
+func (p *Panel) ClearSends() {
+	p.Lock()
+	for k, t := range p.sends {
+		if t.err != "" || t.done >= t.total {
+			delete(p.sends, k)
+		}
+	}
+	p.Unlock()
 }
 
 // Dir returns the directory shown.
@@ -235,28 +288,58 @@ func (p *Panel) Remove(name string, changed func(), say func(title, body string)
 	}()
 }
 
-// Download copies the remote file to the local path in the background,
-// and says how it went.
-func (p *Panel) Download(name, local string, say func(title, body string)) {
-	remote := join(p.dir, name)
+// takeIn pulls a file the other column sends into this one's directory:
+// the send runs on the source's channel with progress the view draws,
+// and the listing refreshes as it lands.
+func (p *Panel) takeIn(srcPanel *Panel, name string) {
+	srcPanel.Lock()
+	srcDir, srcFS := srcPanel.dir, srcPanel.fs
+	srcPanel.Unlock()
+	p.Lock()
+	p.sendSeq++
+	id := p.sendSeq
+	p.sends[id] = &transfer{name: name, total: -1}
+	changed := p.onChanged
+	dest := join(p.dir, name)
+	p.Unlock()
+	if changed != nil {
+		changed()
+	}
 	go func() {
-		err := p.fs.Download(remote, local)
-		if err != nil {
-			say("下载失败", fmt.Sprintf("%s:%v", name, err))
+		report := func(done, total int64) {
+			p.Lock()
+			if t, ok := p.sends[id]; ok {
+				t.done, t.total = done, total
+			}
+			p.Unlock()
+			if changed != nil {
+				changed()
+			}
 		}
+		err := srcFS.Send(join(srcDir, name), dest, p.fs, report)
+		p.Lock()
+		if t, ok := p.sends[id]; ok {
+			if err != nil {
+				t.err = err.Error()
+			} else if t.total < 0 {
+				t.total = t.done
+			}
+		}
+		p.Unlock()
+		if err != nil {
+			plistSay("传输失败", name+": "+err.Error())
+		}
+		p.kick()
 	}()
 }
 
-// Upload copies the local file to the directory shown, in the
-// background, and says how it went.
-func (p *Panel) Upload(name, local string, say func(title, body string)) {
-	remote := join(p.dir, name)
-	go func() {
-		err := p.fs.Upload(local, remote)
-		if err != nil {
-			say("上传失败", err.Error())
-		}
-	}()
+// takeDrop pulls a file dragged from the other column into this one's
+// directory: a row's Drag carries a dragItem its column drops for.
+// Directories stay on their side.
+func (p *Panel) takeDrop(e ui.Element) {
+	if d, ok := ui.Drop[dragItem](e); ok && d.from != nil && d.from != p {
+		d.from.sendOut(d.name)
+	}
 }
 
 // join joins a directory with a name, remote-style.

@@ -30,7 +30,12 @@ func View(c *ui.Context, p *Panel, changed func()) {
 		return
 	}
 	tk := theme.TokensOf(c)
-	ui.Column(c).Fill().Background(tk.BgLayout).Children(func() {
+	root := ui.Column(c).Fill().Background(tk.BgLayout)
+	p.takeDrop(root)
+	if _, over := ui.DragOver[dragItem](root); over {
+		root.InsetShadow(0, 0, 0, 2, tk.Primary)
+	}
+	root.Children(func() {
 		ui.Row(c).Gap(6).Padding(6, 8).AlignItems(ui.Center).Background(tk.BgContainer).Children(func() {
 			if action.ActionIcon(c, lucide.ArrowUp(), action.ActionIconProps{
 				Size: theme.Small, Title: "上一级",
@@ -78,6 +83,30 @@ func View(c *ui.Context, p *Panel, changed func()) {
 				feedback.Spin(c, feedback.SpinProps{Size: theme.Small}, nil)
 			})
 		}
+		if sends := p.Sends(); len(sends) > 0 {
+			ui.Column(c).Gap(4).Padding(6, 10).Background(tk.BgContainer).Children(func() {
+				ui.Divider(c)
+				for _, s := range sends {
+					pct := float32(0)
+					if s.total > 0 {
+						pct = float32(s.done) / float32(s.total) * 100
+					}
+					status := feedback.ProgressActive
+					label := s.name
+					if s.err != "" {
+						status = feedback.ProgressException
+						label = s.name + ": " + s.err
+					} else if s.total >= 0 && s.done >= s.total {
+						status = feedback.ProgressSuccess
+					}
+					feedback.Progress(c, pct, feedback.ProgressProps{
+						Status:   status,
+						ShowInfo: true,
+						Label:    label,
+					})
+				}
+			})
+		}
 		if p.dialogOpen() {
 			p.dialogView(c, changed)
 		}
@@ -88,6 +117,13 @@ func View(c *ui.Context, p *Panel, changed func()) {
 // its size and time, with a right-click menu of what the row can do.
 func entryView(c *ui.Context, p *Panel, e sshclient.Entry, changed func(), tk *theme.Tokens) {
 	row := ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Padding(5, 8).Radius(tk.BorderRadiusSM)
+	if !e.IsDir {
+		row.Drag(dragItem{from: p, name: e.Name})
+		p.takeDrop(row)
+		if _, over := ui.DragOver[dragItem](row); over {
+			row.Background(tk.FillTertiary)
+		}
+	}
 	switch overlay.ContextMenu(c, row, overlay.DropdownMenuProps{Items: rowItems(e)}) {
 	case "enter":
 		p.Visit(e.Name, changed)
@@ -196,33 +232,26 @@ func size(n int64) string {
 }
 
 // sendOut hands a file of this column to the other side: the browser
-// wires other as the column across, whose directory takes the file.
+// wires other as the column across, whose takeIn pulls the file with
+// progress. Single-column panels fall back to a save dialog.
 func (p *Panel) sendOut(name string) {
 	p.Lock()
 	other := p.other
 	dir := p.dir
 	p.Unlock()
 	if other == nil {
-		// Single-column panel: a save dialog picks where it lands.
 		go func() {
 			dest, err := mygo.Dialog.Save(mygo.SaveDialogOptions{Title: "保存 " + name, DefaultPath: name})
 			if err != nil || dest == "" {
 				return
 			}
-			if err := p.fs.Download(join(dir, name), dest); err != nil {
+			if err := p.fs.Send(join(dir, name), dest, LocalFS{}, nil); err != nil {
 				plistSay("传输失败", err.Error())
 			}
 		}()
 		return
 	}
-	dest := join(other.Dir(), name)
-	go func() {
-		if err := p.fs.Download(join(dir, name), dest); err != nil {
-			plistSay("传输失败", name+": "+err.Error())
-			return
-		}
-		other.kick()
-	}()
+	other.takeIn(p, name)
 }
 
 // kick refreshes the column's listing, for a transfer landing in it.
