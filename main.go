@@ -207,11 +207,12 @@ func (a *app) connect(p profiles.Profile, s appui.Secret) {
 		ss.term = term
 		ss.tunnelV = appui.NewTunnelView(conn)
 		ss.termPg = &appui.TermPage{
-			Profile: p,
-			Term:    term,
-			Back:    func() { a.leaveSession(id) },
-			ToFiles: func() { a.filesPage(id) },
-			Tunnels: func() { ss.tunnelV.Open() },
+			Profile:  p,
+			Term:     term,
+			Snippets: appui.NewSnippetView(),
+			Back:     func() { a.leaveSession(id) },
+			ToFiles:  func() { a.filesPage(id) },
+			Tunnels:  func() { ss.tunnelV.Open() },
 		}
 		a.connMu.Lock()
 		a.sess[id] = ss
@@ -390,11 +391,12 @@ func (a *app) reconnect(ss *session) bool {
 	ss.conn, ss.term = conn, term
 	ss.tunnelV = appui.NewTunnelView(conn)
 	ss.termPg = &appui.TermPage{
-		Profile: ss.profile,
-		Term:    term,
-		Back:    func() { a.leaveSession(ss.id) },
-		ToFiles: func() { a.filesPage(ss.id) },
-		Tunnels: func() { ss.tunnelV.Open() },
+		Profile:  ss.profile,
+		Term:     term,
+		Snippets: appui.NewSnippetView(),
+		Back:     func() { a.leaveSession(ss.id) },
+		ToFiles:  func() { a.filesPage(ss.id) },
+		Tunnels:  func() { ss.tunnelV.Open() },
 	}
 	ss.filesPg, ss.panel = nil, nil // 旧 SFTP 随旧连接走了
 	a.connMu.Lock()

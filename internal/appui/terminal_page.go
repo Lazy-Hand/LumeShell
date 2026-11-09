@@ -28,10 +28,12 @@ const (
 
 // TermPage is the terminal of one connected host. The file browser is
 // its own page: the terminal works without SFTP, and SFTP fails without
-// taking the session with it.
+// taking the session with it. Snippets rides the page too, a drawer of
+// saved commands a click sends to the terminal.
 type TermPage struct {
-	Profile profiles.Profile
-	Term    *terminal.Terminal
+	Profile  profiles.Profile
+	Term     *terminal.Terminal
+	Snippets *SnippetView
 
 	// Back runs when the user leaves the terminal; ToFiles opens the
 	// file browser over the same connection; Tunnels opens the port
@@ -53,6 +55,11 @@ func (p *TermPage) View(c *ui.Context) {
 				ui.Text(c, p.Profile.Title()).Bold()
 				ui.Text(c, p.Profile.Endpoint()).FontSize(11).TextColor(tk.TextTertiary)
 			})
+			if action.ActionIcon(c, lucide.TerminalSquare(), action.ActionIconProps{
+				Title: "命令片段",
+			}).Clicked() && p.Snippets != nil {
+				p.Snippets.Open()
+			}
 			if action.ActionIcon(c, lucide.Globe(), action.ActionIconProps{
 				Title: "隧道",
 			}).Clicked() && p.Tunnels != nil {
@@ -67,6 +74,9 @@ func (p *TermPage) View(c *ui.Context) {
 		ui.Divider(c)
 		terminal.View(c, p.Term).Fill().AutoFocus()
 	})
+	if p.Snippets != nil {
+		p.Snippets.View(c, p.Term)
+	}
 }
 
 // FilesPage is the two-column file browser over one connection: the
