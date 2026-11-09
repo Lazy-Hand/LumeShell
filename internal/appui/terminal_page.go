@@ -34,9 +34,11 @@ type TermPage struct {
 	Term    *terminal.Terminal
 
 	// Back runs when the user leaves the terminal; ToFiles opens the
-	// file browser over the same connection.
+	// file browser over the same connection; Tunnels opens the port
+	// forward manager.
 	Back    func()
 	ToFiles func()
+	Tunnels func()
 }
 
 // View builds the page.
@@ -51,6 +53,11 @@ func (p *TermPage) View(c *ui.Context) {
 				ui.Text(c, p.Profile.Title()).Bold()
 				ui.Text(c, p.Profile.Endpoint()).FontSize(11).TextColor(tk.TextTertiary)
 			})
+			if action.ActionIcon(c, lucide.Globe(), action.ActionIconProps{
+				Title: "隧道",
+			}).Clicked() && p.Tunnels != nil {
+				p.Tunnels()
+			}
 			if action.ActionIcon(c, lucide.FolderOpen(), action.ActionIconProps{
 				Title: "文件",
 			}).Clicked() && p.ToFiles != nil {
@@ -103,16 +110,20 @@ func (p *FilesPage) View(c *ui.Context) {
 
 // Hub is the app's pages over one window.
 type Hub struct {
-	List  *List
-	Term  *TermPage
-	Files *FilesPage
-	Now   Page
-	Win   *mygo.Window
-	Store *profiles.Store
+	List    *List
+	Term    *TermPage
+	Files   *FilesPage
+	Tunnels *TunnelView // the session's port forwards, when one is up
+	Now     Page
+	Win     *mygo.Window
+	Store   *profiles.Store
 }
 
 // View builds the page the hub shows.
 func (h *Hub) View(c *ui.Context) {
+	if h.Tunnels != nil {
+		h.Tunnels.View(c) // 对话框浮在任意页上
+	}
 	switch h.Now {
 	case Session:
 		if h.Term != nil {

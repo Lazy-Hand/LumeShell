@@ -137,6 +137,7 @@ type Config struct {
 type Client struct {
 	ssh    *ssh.Client
 	closer io.Closer
+	fwds   *tunnels
 	Conf   Config
 }
 
@@ -244,6 +245,7 @@ func (c *Client) Close() error {
 	if c == nil || c.ssh == nil {
 		return nil
 	}
+	c.CloseTunnels()
 	err := c.ssh.Close()
 	if c.closer != nil && c.closer != c.ssh {
 		c.closer.Close()

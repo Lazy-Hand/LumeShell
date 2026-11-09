@@ -158,15 +158,18 @@ func (a *app) connect(p profiles.Profile, s appui.Secret) {
 		}
 		a.connMu.Lock()
 		a.conn, a.term = conn, term
+		tv := appui.NewTunnelView(conn)
 		page := &appui.TermPage{
 			Profile: p,
 			Term:    term,
 			Back:    func() { a.leaveSession() },
 			ToFiles: func() { a.filesPage(p) },
+			Tunnels: func() { tv.Open() },
 		}
 		a.connMu.Unlock()
 		a.win.Update(func() {
 			a.hub.Term = page
+			a.hub.Tunnels = tv
 			a.hub.Now = appui.Session
 		})
 	}()
@@ -249,6 +252,7 @@ func (a *app) failConnect(why string) {
 func (a *app) leaveSession() {
 	a.teardown()
 	a.hub.Term = nil
+	a.hub.Tunnels = nil
 	a.hub.Now = appui.Home
 	a.win.Update(func() {})
 }
