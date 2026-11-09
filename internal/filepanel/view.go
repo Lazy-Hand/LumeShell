@@ -103,6 +103,8 @@ func View(c *ui.Context, p *Panel, changed func()) {
 						label = s.name + ": " + s.err
 					} else if s.total >= 0 && s.done >= s.total {
 						status = feedback.ProgressSuccess
+					} else if s.queued {
+						label = s.name + " · 排队中"
 					}
 					feedback.Progress(c, pct, feedback.ProgressProps{
 						Status:   status,

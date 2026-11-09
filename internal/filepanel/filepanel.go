@@ -47,6 +47,7 @@ type Panel struct {
 	onChanged func()            // how this column redraws itself
 	sendSeq   int               // the key of the next transfer
 	sends     map[int]*transfer // the transfers in flight, for the view
+	queue     chan struct{}     // 并发槽:占住才发,免得大文件互抢带宽
 
 	// 小对话框:新建目录、重命名。kind 说明它为什么开着,dlgValue
 	// 是它编辑的名字,dlgOpen 让 Modal 显示它。
@@ -116,18 +117,21 @@ func New(fs fileChan, home string) *Panel {
 		dir:     home,
 		loading: map[string]bool{},
 		sends:   map[int]*transfer{},
+		queue:   make(chan struct{}, 2), // 同时最多两条传输在跑
 	}
 	return p
 }
 
 // transfer is one send landing on a panel: its name, how much of it has
-// arrived, and the total, or a failure once it ends wrong. The view
+// arrived, and the total, or a failure once it ends wrong. queued marks
+// one still waiting for a slot; the view shows it as 排队中. The view
 // draws one progress line for each.
 type transfer struct {
-	name  string
-	done  int64
-	total int64
-	err   string
+	name   string
+	done   int64
+	total  int64
+	err    string
+	queued bool
 }
 
 // dragItem is what a row's Drag carries: the panel it leaves, the
@@ -314,7 +318,9 @@ func (p *Panel) takeIn(srcPanel *Panel, name string, isDir bool) {
 	p.takeFile(srcPanel, name, join(srcPanel.dir, name), join(p.dir, name))
 }
 
-// takeFile streams one file from srcPanel's dir into this one's.
+// takeFile streams one file from srcPanel's dir into this one's. It
+// waits for a free slot in the queue first, so drags beyond the
+// concurrency limit line up instead of racing.
 func (p *Panel) takeFile(srcPanel *Panel, name, src, dest string) {
 	srcPanel.Lock()
 	srcFS := srcPanel.fs
@@ -322,13 +328,23 @@ func (p *Panel) takeFile(srcPanel *Panel, name, src, dest string) {
 	p.Lock()
 	p.sendSeq++
 	id := p.sendSeq
-	p.sends[id] = &transfer{name: name, total: -1}
+	p.sends[id] = &transfer{name: name, total: -1, queued: true}
 	changed := p.onChanged
 	p.Unlock()
 	if changed != nil {
 		changed()
 	}
 	go func() {
+		p.queue <- struct{}{}        // 排队拿槽
+		defer func() { <-p.queue }() // 传完放出
+		p.Lock()
+		if t, ok := p.sends[id]; ok {
+			t.queued = false
+		}
+		p.Unlock()
+		if changed != nil {
+			changed()
+		}
 		report := func(done, total int64) {
 			p.Lock()
 			if t, ok := p.sends[id]; ok {
@@ -367,22 +383,32 @@ func (p *Panel) takeDir(srcPanel *Panel, name string) {
 	srcPanel.Unlock()
 	dstDir := join(p.dir, name)
 	src := join(srcDir, name)
+	p.Lock()
+	p.sendSeq++
+	id := p.sendSeq
+	p.sends[id] = &transfer{name: name + "/", total: -1, queued: true}
+	changed := p.onChanged
+	p.Unlock()
+	if changed != nil {
+		changed()
+	}
 	go func() {
+		p.queue <- struct{}{}        // 整棵目录占一个槽
+		defer func() { <-p.queue }() // 传完放出
+		p.Lock()
+		if t, ok := p.sends[id]; ok {
+			t.queued = false
+		}
+		p.Unlock()
+		if changed != nil {
+			changed()
+		}
 		// 先在目标建好目录,再一层层把子孙拉过来;任何一个失败
 		// 都记到整条传输上,能传多少传多少。
 		if err := p.fs.Mkdir(dstDir); err != nil {
 			plistSay("新建目录失败", dstDir+": "+err.Error())
 			p.kick()
 			return
-		}
-		p.Lock()
-		p.sendSeq++
-		id := p.sendSeq
-		p.sends[id] = &transfer{name: name + "/", total: -1}
-		changed := p.onChanged
-		p.Unlock()
-		if changed != nil {
-			changed()
 		}
 		p.walkDir(srcPanel, srcFS, src, dstDir, id, changed)
 		p.Lock()
