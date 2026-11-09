@@ -16,6 +16,7 @@ import (
 	"github.com/lobehub/lobe-mygo/pkg/field"
 	"github.com/lobehub/lobe-mygo/pkg/layout"
 	"github.com/lobehub/lobe-mygo/pkg/lucide"
+	"github.com/lobehub/lobe-mygo/pkg/overlay"
 	"github.com/lobehub/lobe-mygo/pkg/theme"
 )
 
@@ -56,6 +57,10 @@ type List struct {
 	cardErr     string // what the last connect attempt failed with, for the cards
 	cardErrGone bool   // the error banner's close button sets it, FailedCard clears it
 	formErrGone bool   // the form banner's close sets it; a failed connect clears it
+	// sshConfig 是 ~/.ssh/config 里能导入的主机,懒加载一次。
+	sshCfg        []profiles.SSHConfigHost
+	sshCfgLoaded  bool
+	sshImportOpen bool // 导入下拉的开合状态,得活在 List 上
 }
 
 // Secret is what the form gathered to prove the user's identity.
@@ -221,6 +226,7 @@ func (l *List) formView(c *ui.Context) {
 					Closed: &l.formErrGone,
 				})
 			}
+			l.sshImportRow(c)
 			ui.Field(c, "名称（可选）", func() {
 				field.Input(c, &f.label, field.InputProps{Placeholder: "如 公司服务器"})
 			})
@@ -284,6 +290,68 @@ func (l *List) formView(c *ui.Context) {
 	})
 	if ok {
 		l.submit()
+	}
+}
+
+// sshImportRow is the form's first row when ~/.ssh/config has hosts to
+// offer: a dropdown of them that fills the form on a pick. It reads the
+// file once, on the first frame a form is open, and hides when there is
+// nothing to import.
+func (l *List) sshImportRow(c *ui.Context) {
+	if !l.sshCfgLoaded {
+		l.sshCfg = profiles.ReadSSHConfig(profiles.DefaultSSHConfigPath())
+		l.sshCfgLoaded = true
+	}
+	if len(l.sshCfg) == 0 {
+		return
+	}
+	ui.Row(c).Justify(ui.End).Children(func() {
+		chosen := overlay.DropdownMenu(c, &l.sshImportOpen, overlay.DropdownMenuProps{
+			Items: l.sshImportItems(),
+		}, func(t ui.Element) {
+			t.Children(func() {
+				ui.Row(c).Gap(4).AlignItems(ui.Center).Cursor(ui.CursorPointer).Children(func() {
+					ui.Icon(c, lucide.Download()).FontSize(13).TextColor(theme.TokensOf(c).Primary)
+					ui.Text(c, "从 ssh config 导入").FontSize(12).TextColor(theme.TokensOf(c).Primary)
+				})
+			})
+		})
+		if chosen != "" {
+			for _, h := range l.sshCfg {
+				if h.Alias == chosen {
+					l.applySSHConfig(h)
+					break
+				}
+			}
+		}
+	})
+}
+
+// sshImportItems turns the parsed hosts into menu rows.
+func (l *List) sshImportItems() []overlay.MenuItem {
+	out := make([]overlay.MenuItem, 0, len(l.sshCfg))
+	for _, h := range l.sshCfg {
+		label := h.Alias
+		if h.User != "" {
+			label = h.User + "@" + h.HostName + " (" + h.Alias + ")"
+		}
+		out = append(out, overlay.MenuItem{Key: h.Alias, Label: label, Icon: lucide.Server()})
+	}
+	return out
+}
+
+// applySSHConfig fills the form from a config host: the address, port
+// and user, and the key path when a IdentityFile is set (which also
+// flips the auth segmented to 私钥).
+func (l *List) applySSHConfig(h profiles.SSHConfigHost) {
+	f := &l.form
+	f.label = h.Alias
+	f.host = h.HostName
+	f.port = h.Port
+	f.user = h.User
+	if h.Identity != "" {
+		f.auth = 1
+		f.keyPath = h.Identity
 	}
 }
 
