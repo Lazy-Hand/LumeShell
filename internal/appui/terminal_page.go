@@ -66,14 +66,14 @@ func (p *TermPage) View(c *ui.Context) {
 			}).Clicked() && p.Triggers != nil {
 				p.Triggers.Open()
 			}
-			if action.ActionIcon(c, lucide.Globe(), action.ActionIconProps{
+			if p.Tunnels != nil && action.ActionIcon(c, lucide.Globe(), action.ActionIconProps{
 				Title: "隧道",
-			}).Clicked() && p.Tunnels != nil {
+			}).Clicked() {
 				p.Tunnels()
 			}
-			if action.ActionIcon(c, lucide.FolderOpen(), action.ActionIconProps{
+			if p.ToFiles != nil && action.ActionIcon(c, lucide.FolderOpen(), action.ActionIconProps{
 				Title: "文件",
-			}).Clicked() && p.ToFiles != nil {
+			}).Clicked() {
 				p.ToFiles()
 			}
 		})

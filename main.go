@@ -124,6 +124,7 @@ func main() {
 		a.list = appui.NewList(a.store)
 		a.list.Connect = a.connect
 		a.list.Delete = func(p profiles.Profile) { _ = a.store.Remove(p.ID) }
+		a.list.LocalShell = a.openLocalShell
 		a.hub.List = a.list
 		a.hub.Now = appui.Home
 		a.win = mygo.NewWindow(mygo.WindowOptions{
@@ -192,6 +193,46 @@ func (a *app) tabs(c *ui.Context) {
 				a.showSession(sess.id)
 			}
 		}
+	})
+}
+
+// openLocalShell opens a tab running the user's login shell on this
+// machine — no SSH, no SFTP, no tunnels. Its session carries a nil
+// conn; every conn use checks for it.
+func (a *app) openLocalShell() {
+	a.connMu.Lock()
+	a.seq++
+	id := fmt.Sprintf("local-%d", a.seq)
+	a.connMu.Unlock()
+	ss := &session{id: id, profile: profiles.Profile{Label: "本地终端"}}
+	ss.watcher = appui.NewTriggerWatcher(func(matched string) { a.triggerHit(id, matched) })
+	ss.trigV = appui.NewTriggerView(ss.watcher)
+	ss.logger = sshclient.OpenSessionLogger(a.logDir(), id)
+	term, err := terminal.New(terminal.Options{
+		OptionAsAlt: true,
+		// 空 Command 走 $SHELL 登录 shell;Conn 空就是本地 PTY。
+		OnTitle: func(title string) { a.win.SetTitle(title) },
+		OnExit:  func(int) { a.sessionEnded(id) },
+	})
+	if err != nil {
+		return
+	}
+	ss.term = term
+	ss.termPg = &appui.TermPage{
+		Profile:  ss.profile,
+		Term:     term,
+		Snippets: appui.NewSnippetView(),
+		Triggers: ss.trigV,
+		Back:     func() { a.leaveSession(id) },
+		// ToFiles/Tunnels 留空:本地会话没有远端文件和隧道。
+	}
+	a.connMu.Lock()
+	a.sess[id] = ss
+	a.active = id
+	a.connMu.Unlock()
+	a.win.Update(func() {
+		a.hub.Term = ss.termPg
+		a.hub.Now = appui.Session
 	})
 }
 
@@ -289,6 +330,9 @@ func (a *app) filesPage(id string) {
 		})
 		return
 	}
+	if ss.conn == nil {
+		return // 本地 shell 没有 SFTP
+	}
 	go func() {
 		fs, err := ss.conn.SFTP()
 		if err != nil {
@@ -385,9 +429,9 @@ func (a *app) sessionEnded(id string) {
 	if !ok || ending {
 		return
 	}
-	// 断开的不是自己点的:先重连一次,成功就不打扰。
+	// 断开的不是自己点的:SSH 会话先重连一次,本地 shell 直接报。
 	go func() {
-		if a.reconnect(ss) {
+		if ss.conn != nil && a.reconnect(ss) {
 			return
 		}
 		a.win.Update(func() {

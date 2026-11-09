@@ -28,9 +28,11 @@ type List struct {
 
 	// Connect runs with the profile of a card, or the form's new
 	// settings as nil, when the user wants to connect. Delete runs with
-	// the profile to drop. Both come from main.
-	Connect func(p profiles.Profile, secret Secret)
-	Delete  func(p profiles.Profile)
+	// the profile to drop. LocalShell opens a local terminal tab. All
+	// come from main.
+	Connect    func(p profiles.Profile, secret Secret)
+	Delete     func(p profiles.Profile)
+	LocalShell func()
 
 	// Win is the window the pages show in, for dialogs and redraws.
 	Win *mygo.Window
@@ -155,7 +157,10 @@ func (l *List) cardsView(c *ui.Context) {
 		})
 		return
 	}
-	ui.Row(c).Width(560).Justify(ui.End).Children(func() {
+	ui.Row(c).Width(560).Justify(ui.End).Gap(8).Children(func() {
+		if action.Button(c, "本地终端", action.ButtonProps{}).Clicked() && l.LocalShell != nil {
+			l.LocalShell()
+		}
 		if action.Button(c, "新建连接", action.ButtonProps{Variant: action.Primary}).Clicked() {
 			l.editForm(profiles.Profile{}, false)
 		}
