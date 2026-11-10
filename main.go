@@ -20,6 +20,8 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/terminal"
+	"github.com/egoist/mygo/plugins/updater"
+	updaterui "github.com/egoist/mygo/plugins/updater/native"
 	"github.com/egoist/mygo/ui"
 	"github.com/lobehub/lobe-mygo/pkg/lucide"
 	"github.com/lobehub/lobe-mygo/pkg/theme"
@@ -117,7 +119,26 @@ func (g *dialGuard) done() {
 func main() {
 	a := &app{sess: map[string]*session{}}
 	var listErr error
+	// Sparkle 式更新窗口:后台每日检查,"检查更新…"在应用菜单里。
+	// dev 构建下是 no-op。
+	mygo.Use(updaterui.Plugin)
 	mygo.App.WhenReady(func() {
+		mygo.App.SetMenu(mygo.NewMenu([]*mygo.MenuItem{
+			{Label: "LumeShell", Submenu: []*mygo.MenuItem{
+				{Role: mygo.RoleAbout},
+				updater.MenuItem(),
+				mygo.Separator(),
+				{Role: mygo.RoleServices},
+				mygo.Separator(),
+				{Role: mygo.RoleHide},
+				{Role: mygo.RoleHideOthers},
+				{Role: mygo.RoleUnhide},
+				mygo.Separator(),
+				{Role: mygo.RoleQuit},
+			}},
+			{Role: mygo.RoleEditMenu},
+			{Role: mygo.RoleWindowMenu},
+		}))
 		mygo.Theme.SetSource(appui.LoadThemeSource())
 		dir, err := mygo.App.Path(mygo.PathUserData)
 		if err == nil {
