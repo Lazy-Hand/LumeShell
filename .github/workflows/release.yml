@@ -83,17 +83,6 @@ jobs:
     needs: build-macos
     runs-on: ubuntu-latest
     steps:
-      # mygo -upload always puts install.sh and SHA256SUMS on the release;
-      # they are Linux/verify files this app doesn't ship, so drop them
-      # before the release goes public.
-      - name: Drop extra assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for f in install.sh SHA256SUMS; do
-            gh release delete-asset "$GITHUB_REF_NAME" "$f" --repo "$GITHUB_REPOSITORY" -y 2>/dev/null || true
-          done
-
       - env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false
