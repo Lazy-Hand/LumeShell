@@ -1,6 +1,6 @@
 {
-  "name": "Lume",
-  "identifier": "com.example.lume",
+  "name": "LumeShell",
+  "identifier": "com.example.lumeshell",
   "version": "0.1.0",
   "out": "build"
 }

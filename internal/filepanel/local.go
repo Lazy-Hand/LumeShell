@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"sort"
 
-	"lume/internal/sshclient"
+	"lumeshell/internal/sshclient"
 )
 
 // LocalFS is the panel's file channel over this machine's file system,

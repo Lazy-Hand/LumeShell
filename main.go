@@ -1,4 +1,4 @@
-// Lume is an SSH client: the user picks a host, the app connects and
+// LumeShell is an SSH client: the user picks a host, the app connects and
 // shows its terminal, and file transfers ride the same connection. The
 // window shows one page at a time: the host list, or a session's
 // terminal and its files. Several sessions can be open at once, as
@@ -13,10 +13,10 @@ import (
 	"strings"
 	"sync"
 
-	"lume/internal/appui"
-	"lume/internal/filepanel"
-	"lume/internal/profiles"
-	"lume/internal/sshclient"
+	"lumeshell/internal/appui"
+	"lumeshell/internal/filepanel"
+	"lumeshell/internal/profiles"
+	"lumeshell/internal/sshclient"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/terminal"
@@ -130,7 +130,7 @@ func main() {
 		a.hub.List = a.list
 		a.hub.Now = appui.Home
 		a.win = mygo.NewWindow(mygo.WindowOptions{
-			Title:     "Lume",
+			Title:     "LumeShell",
 			Width:     960,
 			Height:    640,
 			MinWidth:  720,
@@ -480,7 +480,7 @@ func (a *app) sessionEnded(id string) {
 		})
 		a.closeSession(id)
 		if wasActive {
-			a.win.Update(func() { a.win.SetTitle("Lume") })
+			a.win.Update(func() { a.win.SetTitle("LumeShell") })
 		}
 	}()
 }

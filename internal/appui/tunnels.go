@@ -1,7 +1,7 @@
 package appui
 
 import (
-	"lume/internal/sshclient"
+	"lumeshell/internal/sshclient"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/lobehub/lobe-mygo/pkg/action"

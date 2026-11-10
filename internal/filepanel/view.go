@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"lume/internal/sshclient"
+	"lumeshell/internal/sshclient"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"

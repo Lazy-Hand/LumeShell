@@ -7,8 +7,8 @@ import (
 	"github.com/lobehub/lobe-mygo/pkg/action"
 	"github.com/lobehub/lobe-mygo/pkg/lucide"
 	"github.com/lobehub/lobe-mygo/pkg/theme"
-	"lume/internal/filepanel"
-	"lume/internal/profiles"
+	"lumeshell/internal/filepanel"
+	"lumeshell/internal/profiles"
 )
 
 // Page is what the window shows: the list of hosts, the terminal of the

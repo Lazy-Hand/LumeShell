@@ -248,7 +248,7 @@ func (c *Client) keepalive(every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for range t.C {
-		if _, _, err := c.ssh.SendRequest("keepalive@lume", true, nil); err != nil {
+		if _, _, err := c.ssh.SendRequest("keepalive@lumeshell", true, nil); err != nil {
 			return // 连接死了,退出循环
 		}
 	}

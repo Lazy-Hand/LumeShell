@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/egoist/mygo/ui"
-	"lume/internal/profiles"
+	"lumeshell/internal/profiles"
 )
 
 func uiTester(view func(c *ui.Context)) *ui.Tester {

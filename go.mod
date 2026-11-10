@@ -1,4 +1,4 @@
-module lume
+module lumeshell
 
 go 1.27.3
 

@@ -19,7 +19,7 @@ func (p *Panel) editOnline(name string) {
 	p.Unlock()
 	src := join(dir, name)
 	go func() {
-		tmp, err := os.CreateTemp("", "lume-edit-*"+filepath.Ext(name))
+		tmp, err := os.CreateTemp("", "lumeshell-edit-*"+filepath.Ext(name))
 		if err != nil {
 			plistSay("编辑失败", err.Error())
 			return

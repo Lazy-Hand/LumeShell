@@ -6,7 +6,7 @@ package appui
 import (
 	"fmt"
 
-	"lume/internal/profiles"
+	"lumeshell/internal/profiles"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
@@ -91,7 +91,7 @@ func (l *List) View(c *ui.Context) {
 	tk := theme.TokensOf(c)
 	ui.Column(c).Fill().Padding(32).Gap(24).AlignItems(ui.Center).Children(func() {
 		ui.Column(c).Gap(6).AlignItems(ui.Center).Children(func() {
-			ui.Text(c, "Lume").FontSize(28).Bold()
+			ui.Text(c, "LumeShell").FontSize(28).Bold()
 			ui.Text(c, "SSH 终端").FontSize(14).TextColor(tk.TextSecondary)
 			l.themeRow(c)
 		})

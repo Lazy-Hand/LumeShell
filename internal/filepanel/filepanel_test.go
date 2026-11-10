@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"lume/internal/sshclient"
+	"lumeshell/internal/sshclient"
 )
 
 // fakeFS is the panel's file channel over a local tree, serving the
