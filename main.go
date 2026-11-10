@@ -21,6 +21,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
+	"github.com/lobehub/lobe-mygo/pkg/lucide"
 	"github.com/lobehub/lobe-mygo/pkg/theme"
 )
 
@@ -156,8 +157,9 @@ func (a *app) view(c *ui.Context) {
 	a.hub.View(c)
 }
 
-// tabs draws a tab per open session: clicking one brings its page up,
-// the ✕ closes it. Nothing renders with fewer than two sessions.
+// tabs draws a tab per open session plus a "+" that goes back to the
+// host list: clicking one brings its page up, the ✕ closes it. With
+// nothing open it renders nothing — the list page is the view then.
 func (a *app) tabs(c *ui.Context) {
 	a.connMu.Lock()
 	sessions := make([]*session, 0, len(a.sess))
@@ -166,11 +168,11 @@ func (a *app) tabs(c *ui.Context) {
 	}
 	active := a.active
 	a.connMu.Unlock()
-	if len(sessions) < 2 {
+	if len(sessions) == 0 {
 		return
 	}
 	tk := theme.TokensOf(c)
-	ui.Row(c).Gap(2).Padding(4, 8).Background(tk.BgContainer).Children(func() {
+	ui.Row(c).Gap(2).Padding(4, 8).AlignItems(ui.Center).Background(tk.BgContainer).Children(func() {
 		for _, s := range sessions {
 			sess := s
 			on := sess.id == active
@@ -194,6 +196,24 @@ func (a *app) tabs(c *ui.Context) {
 				a.showSession(sess.id)
 			}
 		}
+		// + :回到主机列表再连一台,已有 tab 留着。
+		plus := ui.Row(c).Padding(4, 10).Radius(tk.BorderRadiusSM).Cursor(ui.CursorPointer)
+		if plus.Hovered() {
+			plus.Background(tk.FillQuaternary)
+		}
+		plus.Children(func() {
+			ui.Icon(c, lucide.Plus()).FontSize(14).TextColor(tk.TextSecondary)
+		})
+		if plus.Clicked() {
+			a.showList()
+		}
+	})
+}
+
+// showList brings the host list up without dropping any session.
+func (a *app) showList() {
+	a.win.Update(func() {
+		a.hub.Now = appui.Home
 	})
 }
 
@@ -302,6 +322,7 @@ func (a *app) connect(p profiles.Profile, s appui.Secret) {
 			Back:     func() { a.leaveSession(id) },
 			ToFiles:  func() { a.filesPage(id) },
 			Tunnels:  func() { ss.tunnelV.Open() },
+			NewConn:  func() { a.showList() },
 		}
 		a.connMu.Lock()
 		a.sess[id] = ss
@@ -513,6 +534,7 @@ func (a *app) reconnect(ss *session) bool {
 		Back:     func() { a.leaveSession(ss.id) },
 		ToFiles:  func() { a.filesPage(ss.id) },
 		Tunnels:  func() { ss.tunnelV.Open() },
+		NewConn:  func() { a.showList() },
 	}
 	ss.filesPg, ss.panel = nil, nil // 旧 SFTP 随旧连接走了
 	a.connMu.Lock()

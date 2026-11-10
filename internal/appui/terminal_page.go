@@ -38,10 +38,12 @@ type TermPage struct {
 
 	// Back runs when the user leaves the terminal; ToFiles opens the
 	// file browser over the same connection; Tunnels opens the port
-	// forward manager.
+	// forward manager; NewConn goes back to the host list keeping the
+	// session alive.
 	Back    func()
 	ToFiles func()
 	Tunnels func()
+	NewConn func()
 }
 
 // View builds the page.
@@ -75,6 +77,11 @@ func (p *TermPage) View(c *ui.Context) {
 				Title: "文件",
 			}).Clicked() {
 				p.ToFiles()
+			}
+			if p.NewConn != nil && action.ActionIcon(c, lucide.Plus(), action.ActionIconProps{
+				Title: "新建连接",
+			}).Clicked() {
+				p.NewConn()
 			}
 		})
 		ui.Divider(c)
