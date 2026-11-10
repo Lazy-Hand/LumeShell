@@ -39,6 +39,7 @@ type session struct {
 	trigV   *appui.TriggerView
 	watcher *appui.TriggerWatcher
 	logger  *sshclient.SessionLogger
+	onFiles bool             // 它最后停在文件页(换 tab 回来时还原)
 	panel   *filepanel.Panel // the remote panel, for closing
 }
 
@@ -324,6 +325,9 @@ func (a *app) filesPage(id string) {
 		return
 	}
 	if ss.filesPg != nil {
+		a.connMu.Lock()
+		ss.onFiles = true
+		a.connMu.Unlock()
 		a.win.Update(func() {
 			a.hub.Files = ss.filesPg
 			a.hub.Now = appui.Files
@@ -357,12 +361,13 @@ func (a *app) filesPage(id string) {
 			Remote:    remote,
 			Local:     local,
 			SideWidth: 420,
-			Back:      func() { a.showSession(id) },
+			Back:      func() { a.backToTerm(id) },
 		}
 		a.connMu.Lock()
 		if cur, ok := a.sess[id]; ok {
 			cur.filesPg = page
 			cur.panel = remote
+			cur.onFiles = true
 		}
 		a.connMu.Unlock()
 		a.win.Update(func() {
@@ -372,8 +377,8 @@ func (a *app) filesPage(id string) {
 	}()
 }
 
-// showSession brings session id's page up, terminal unless its files
-// were the last thing it showed.
+// showSession brings session id's page up: its files when it was last
+// on them, its terminal otherwise.
 func (a *app) showSession(id string) {
 	a.connMu.Lock()
 	ss, ok := a.sess[id]
@@ -388,13 +393,25 @@ func (a *app) showSession(id string) {
 		ss.watcher.Clear() // 看过了,红点消掉
 	}
 	a.win.Update(func() {
-		if ss.filesPg != nil && a.hub.Now == appui.Files {
+		if ss.filesPg != nil && ss.onFiles {
 			a.hub.Files = ss.filesPg
+			a.hub.Now = appui.Files
 		} else {
 			a.hub.Term = ss.termPg
 			a.hub.Now = appui.Session
 		}
 	})
+}
+
+// backToTerm leaves the file browser for the terminal the session was
+// opened on.
+func (a *app) backToTerm(id string) {
+	a.connMu.Lock()
+	if ss, ok := a.sess[id]; ok {
+		ss.onFiles = false
+	}
+	a.connMu.Unlock()
+	a.showSession(id)
 }
 
 // failConnect reports why a session did not come up.
