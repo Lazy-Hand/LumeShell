@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sync"
 
+	"lumeshell/internal/atomicfile"
+
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/terminal"
 	"github.com/egoist/mygo/ui"
@@ -29,40 +31,65 @@ type Snippet struct {
 	Text string `json:"text"` // \n 会原样发给 shell,多行就是多条命令
 }
 
+// snippetStore is the app's one list, read on first use and shared by
+// every terminal's drawer: a tab's add or delete lands in every tab and
+// on disk, where a per-tab copy would let one drawer save its stale list
+// over another's.
+var snippetStore struct {
+	mu     sync.Mutex
+	list   []Snippet
+	loaded bool
+}
+
+// snippets is a copy of the saved list.
+func snippets() []Snippet {
+	snippetStore.mu.Lock()
+	defer snippetStore.mu.Unlock()
+	if !snippetStore.loaded {
+		snippetStore.list = loadSnippets()
+		snippetStore.loaded = true
+	}
+	out := make([]Snippet, len(snippetStore.list))
+	copy(out, snippetStore.list)
+	return out
+}
+
+// editSnippets changes the list and saves it, under the one lock, so two
+// tabs changing it at once both land.
+func editSnippets(fn func([]Snippet) []Snippet) {
+	snippetStore.mu.Lock()
+	defer snippetStore.mu.Unlock()
+	if !snippetStore.loaded {
+		snippetStore.list = loadSnippets()
+		snippetStore.loaded = true
+	}
+	snippetStore.list = fn(snippetStore.list)
+	saveSnippets(snippetStore.list)
+}
+
 // SnippetView is the snippets drawer of one terminal: it lists what is
-// saved, sends one on click, and takes a new one with name + text.
+// saved, sends one on click, and takes a new one with name + text. Its
+// fields are the UI thread's alone; the list it shows is snippetStore's.
 type SnippetView struct {
-	mu   sync.Mutex
-	list []Snippet
-	open bool
-	// 新片段表单:name+text 都填上才能存。
+	open    bool
 	newName string
 	newText string
 	err     string
 }
 
-// NewSnippetView loads the saved snippets.
-func NewSnippetView() *SnippetView {
-	return &SnippetView{list: loadSnippets()}
-}
+// NewSnippetView makes the drawer over the shared list.
+func NewSnippetView() *SnippetView { return &SnippetView{} }
 
 // Open flips the drawer's visibility.
-func (v *SnippetView) Open() {
-	v.mu.Lock()
-	v.open = !v.open
-	v.mu.Unlock()
-}
+func (v *SnippetView) Open() { v.open = !v.open }
 
 // View builds the drawer when it is open, over the terminal page.
 // term is where a clicked snippet's text goes.
 func (v *SnippetView) View(c *ui.Context, term *terminal.Terminal) {
-	v.mu.Lock()
 	if !v.open {
-		v.mu.Unlock()
 		return
 	}
-	list := append([]Snippet(nil), v.list...)
-	v.mu.Unlock()
+	list := snippets()
 	tk := theme.TokensOf(c)
 
 	feedback.Drawer(c, &v.open, feedback.DrawerProps{
@@ -74,7 +101,7 @@ func (v *SnippetView) View(c *ui.Context, term *terminal.Terminal) {
 			}
 			for _, s := range list {
 				s := s
-				row := ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(6).
+				row := ui.Row(c).Key(s.ID).FillWidth().AlignItems(ui.Center).Gap(6).
 					Padding(6, 8).Radius(tk.BorderRadiusSM).Cursor(ui.CursorPointer)
 				if row.Hovered() {
 					row.Background(tk.FillTertiary)
@@ -98,14 +125,10 @@ func (v *SnippetView) View(c *ui.Context, term *terminal.Terminal) {
 			ui.Divider(c)
 			ui.Column(c).Gap(6).Children(func() {
 				ui.Text(c, "新片段").FontSize(12).Bold()
-				v.mu.Lock()
 				name, text, err := v.newName, v.newText, v.err
-				v.mu.Unlock()
 				field.Input(c, &name, field.InputProps{Placeholder: "名字,如:看负载"})
 				field.Input(c, &text, field.InputProps{Placeholder: "命令"})
-				v.mu.Lock()
 				v.newName, v.newText = name, text
-				v.mu.Unlock()
 				if err != "" {
 					ui.Text(c, err).FontSize(11).TextColor(tk.Error)
 				}
@@ -133,33 +156,27 @@ func (v *SnippetView) send(term *terminal.Terminal, text string) {
 
 // add takes the form's name+text into the list and writes it to disk.
 func (v *SnippetView) add() {
-	v.mu.Lock()
 	name, text := v.newName, v.newText
 	if name == "" || text == "" {
 		v.err = "名字和命令都要填"
-		v.mu.Unlock()
 		return
 	}
-	v.list = append(v.list, Snippet{ID: newSnippetID(), Name: name, Text: text})
+	s := Snippet{ID: newSnippetID(), Name: name, Text: text}
+	editSnippets(func(list []Snippet) []Snippet { return append(list, s) })
 	v.newName, v.newText, v.err = "", "", ""
-	list := append([]Snippet(nil), v.list...)
-	v.mu.Unlock()
-	saveSnippets(list)
 }
 
 // remove drops the snippet with id.
 func (v *SnippetView) remove(id string) {
-	v.mu.Lock()
-	out := v.list[:0]
-	for _, s := range v.list {
-		if s.ID != id {
-			out = append(out, s)
+	editSnippets(func(list []Snippet) []Snippet {
+		out := list[:0]
+		for _, s := range list {
+			if s.ID != id {
+				out = append(out, s)
+			}
 		}
-	}
-	v.list = out
-	list := append([]Snippet(nil), v.list...)
-	v.mu.Unlock()
-	saveSnippets(list)
+		return out
+	})
 }
 
 // newSnippetID is a random id, for telling rows apart on delete.
@@ -206,13 +223,5 @@ func saveSnippets(list []Snippet) {
 	if path == "" {
 		return
 	}
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return
-	}
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	tmp := path + ".tmp"
-	if os.WriteFile(tmp, data, 0o600) == nil {
-		_ = os.Rename(tmp, path)
-	}
+	_ = atomicfile.WriteJSON(path, list)
 }

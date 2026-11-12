@@ -33,6 +33,10 @@ type List struct {
 	Connect    func(p profiles.Profile, secret Secret)
 	Delete     func(p profiles.Profile)
 	LocalShell func()
+	// Confirm asks before something destructive runs, and reports
+	// whether to go ahead. It defaults to a native warning dialog;
+	// tests stand in for it.
+	Confirm func(title, message, detail string) bool
 
 	// Win is the window the pages show in, for dialogs and redraws.
 	Win *mygo.Window
@@ -59,16 +63,21 @@ type List struct {
 	cardErr     string // what the last connect attempt failed with, for the cards
 	cardErrGone bool   // the error banner's close button sets it, FailedCard clears it
 	formErrGone bool   // the form banner's close sets it; a failed connect clears it
-	// sshConfig 是 ~/.ssh/config 里能导入的主机,懒加载一次。
+	// connecting is up while a dial runs, so the page says so instead of
+	// looking dead.
+	connecting bool
+
+	// sshConfig 是 ~/.ssh/config 里能导入的主机,每次开表单重读。
 	sshCfg        []profiles.SSHConfigHost
 	sshCfgLoaded  bool
 	sshImportOpen bool // 导入下拉的开合状态,得活在 List 上
 }
 
-// Secret is what the form gathered to prove the user's identity.
+// Secret is what the form gathered to prove the user's identity. A key
+// profile's path is in the profile; its passphrase is here, as a
+// password is, because neither reaches disk.
 type Secret struct {
 	Password   string
-	KeyPath    string
 	Passphrase string
 }
 
@@ -77,11 +86,19 @@ func NewList(store *profiles.Store) *List {
 	l := &List{store: store}
 	l.Connect = func(profiles.Profile, Secret) {}
 	l.Delete = func(profiles.Profile) {}
+	l.Confirm = confirmDialog
 	return l
 }
 
 // ShowHome returns the list page to its cards.
-func (l *List) ShowHome() { l.form.open = false }
+func (l *List) ShowHome() {
+	l.form.open = false
+	l.err = ""
+}
+
+// SetConnecting says whether a dial is up, which the page shows. It is
+// the UI thread's to call.
+func (l *List) SetConnecting(on bool) { l.connecting = on }
 
 // FailedCard reports why a connect attempt failed, beside the cards.
 func (l *List) FailedCard(why string) { l.cardErr, l.cardErrGone = why, false }
@@ -135,6 +152,9 @@ func (l *List) themeRow(c *ui.Context) {
 // the user types the password or the key's passphrase there.
 func (l *List) cardsView(c *ui.Context) {
 	ps := l.store.List()
+	if l.connecting {
+		l.connectingRow(c)
+	}
 	if l.cardErr != "" {
 		ui.Row(c).Width(560).Children(func() {
 			feedback.Alert(c, l.cardErr, feedback.AlertProps{
@@ -178,7 +198,7 @@ func (l *List) cardsView(c *ui.Context) {
 // logs in, with 连接 filling the form and 删除 dropping it.
 func (l *List) cardView(c *ui.Context, profile profiles.Profile) {
 	layout.Block(c, layout.BlockProps{Variant: layout.BlockOutlined, Shadow: true}).
-		FillWidth().Padding(14).Children(func() {
+		Key(profile.ID).FillWidth().Padding(14).Children(func() {
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(12).Children(func() {
 			ui.Icon(c, lucide.Server()).FontSize(20).TextColor(theme.TokensOf(c).TextTertiary)
 			ui.Column(c).Grow(1).Gap(4).MinWidth(0).Children(func() {
@@ -204,7 +224,7 @@ func (l *List) cardView(c *ui.Context, profile profiles.Profile) {
 			if action.ActionIcon(c, lucide.Trash2(), action.ActionIconProps{
 				Danger: true, Title: "删除",
 			}).Clicked() {
-				l.Delete(profile)
+				l.confirmDelete(profile)
 			}
 		})
 	})
@@ -215,6 +235,8 @@ func (l *List) cardView(c *ui.Context, profile profiles.Profile) {
 func (l *List) editForm(p profiles.Profile, fresh bool) {
 	f := &l.form
 	f.open = true
+	l.err = ""
+	l.sshCfgLoaded = false // 每次开表单重读,改了 ~/.ssh/config 不用重启
 	f.editing = p.ID
 	f.label = p.Label
 	f.host = p.Host
@@ -405,7 +427,7 @@ func (l *List) submit() {
 		User:     f.user,
 		Auth:     authType,
 		KeyPath:  keyPath,
-		HasPass:  true, // 密码与口令只留在本页,不入盘
+		HasPass:  f.password != "" || f.passphr != "", // 密码与口令只留在本页,不入盘
 		JumpHost: f.jumpHost,
 		JumpPort: f.jumpPort,
 		JumpUser: f.jumpUser,
@@ -417,7 +439,7 @@ func (l *List) submit() {
 	}
 	l.err = ""
 	l.form.open = false
-	l.Connect(p, Secret{Password: f.password, KeyPath: keyPath, Passphrase: f.passphr})
+	l.Connect(p, Secret{Password: f.password, Passphrase: f.passphr})
 }
 
 // pickKey opens the private key file dialog off the view's goroutine and
@@ -442,6 +464,54 @@ func (l *List) pickKey() {
 			}
 		})
 	}()
+}
+
+// confirmDelete asks before a card drops a saved host: deleting is one
+// click and has no undo. The dialog runs off the UI thread, as it blocks.
+func (l *List) confirmDelete(p profiles.Profile) {
+	confirm := l.Confirm
+	win := l.Win
+	if confirm == nil {
+		return
+	}
+	go func() {
+		if !confirm("删除主机", "删除 "+p.Title()+"?", p.Endpoint()) {
+			return
+		}
+		// Delete is the store's, which takes any goroutine; the page
+		// reads it again on the next frame.
+		if l.Delete != nil {
+			l.Delete(p)
+		}
+		if win != nil {
+			win.Update(func() {})
+		}
+	}()
+}
+
+// confirmDialog is the default Confirm: a native warning whose Enter and
+// Escape both cancel, so a stray return cannot drop a saved host.
+func confirmDialog(title, message, detail string) bool {
+	res, err := mygo.Dialog.Message(mygo.MessageOptions{
+		Type:               mygo.MessageWarning,
+		Title:              title,
+		Message:            message,
+		Detail:             detail,
+		Buttons:            []string{"删除", "取消"},
+		DefaultButton:      1,
+		CancelButton:       1,
+		DestructiveButtons: []int{0},
+	})
+	return err == nil && res.Button == 0
+}
+
+// connectingRow says a dial is up, so a second click waiting on it does
+// not look ignored.
+func (l *List) connectingRow(c *ui.Context) {
+	ui.Row(c).Width(560).AlignItems(ui.Center).Gap(8).Children(func() {
+		feedback.Spin(c, feedback.SpinProps{Size: theme.Small}, nil)
+		ui.Text(c, "连接中…").FontSize(12).TextColor(theme.TokensOf(c).TextSecondary)
+	})
 }
 
 // ErrorText returns a human-readable message for a connect failure, for

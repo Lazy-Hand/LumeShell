@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"sync"
+	"sync/atomic"
+
+	"lumeshell/internal/atomicfile"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
@@ -59,15 +62,44 @@ func saveTriggers(list []Trigger) {
 	if path == "" {
 		return
 	}
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return
+	_ = atomicfile.WriteJSON(path, list)
+}
+
+// triggerStore is the app's one list, shared by every session, and
+// gen counts its changes so each session's watcher picks up what
+// another session's drawer saved.
+var triggerStore struct {
+	mu     sync.Mutex
+	list   []Trigger
+	loaded bool
+	gen    atomic.Int64
+}
+
+// triggers is a copy of the saved list and the generation it is.
+func triggers() ([]Trigger, int64) {
+	triggerStore.mu.Lock()
+	defer triggerStore.mu.Unlock()
+	if !triggerStore.loaded {
+		triggerStore.list = loadTriggers()
+		triggerStore.loaded = true
 	}
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	tmp := path + ".tmp"
-	if os.WriteFile(tmp, data, 0o600) == nil {
-		_ = os.Rename(tmp, path)
+	out := make([]Trigger, len(triggerStore.list))
+	copy(out, triggerStore.list)
+	return out, triggerStore.gen.Load()
+}
+
+// editTriggers changes the list and saves it under the one lock, then
+// bumps the generation so live watchers re-arm.
+func editTriggers(fn func([]Trigger) []Trigger) {
+	triggerStore.mu.Lock()
+	if !triggerStore.loaded {
+		triggerStore.list = loadTriggers()
+		triggerStore.loaded = true
 	}
+	triggerStore.list = fn(triggerStore.list)
+	saveTriggers(triggerStore.list)
+	triggerStore.gen.Add(1)
+	triggerStore.mu.Unlock()
 }
 
 // TriggerWatcher wraps a session's output stream: every chunk the
@@ -78,6 +110,7 @@ type TriggerWatcher struct {
 	mu    sync.Mutex
 	list  []Trigger
 	res   []*regexp.Regexp // list 编译来的,同序
+	gen   int64            // the triggerStore generation res came from
 	fired bool             // 本连接周期内报过一次就不重复闪
 	fire  func(matched string)
 }
@@ -90,9 +123,9 @@ func NewTriggerWatcher(fire func(string)) *TriggerWatcher {
 	return w
 }
 
-// Reload re-reads the saved patterns, after the drawer changed them.
+// Reload re-reads the saved patterns, after a drawer changed them.
 func (w *TriggerWatcher) Reload() {
-	list := loadTriggers()
+	list, gen := triggers()
 	res := make([]*regexp.Regexp, 0, len(list))
 	for _, t := range list {
 		if re, err := regexp.Compile(t.Pattern); err == nil {
@@ -100,7 +133,7 @@ func (w *TriggerWatcher) Reload() {
 		}
 	}
 	w.mu.Lock()
-	w.list, w.res = list, res
+	w.list, w.res, w.gen = list, res, gen
 	w.mu.Unlock()
 }
 
@@ -120,11 +153,17 @@ func (w *TriggerWatcher) Clear() {
 }
 
 // Scan looks for a pattern in the output chunk and fires on the first
-// hit of the session, at most once per Clear.
+// hit of the session, at most once per Clear. It picks up a list another
+// drawer saved before it looks.
 func (w *TriggerWatcher) Scan(chunk []byte) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
+	if w.gen != triggerStore.gen.Load() {
+		w.mu.Unlock()
+		w.Reload()
+		w.mu.Lock()
+	}
 	if w.fired {
+		w.mu.Unlock()
 		return
 	}
 	for _, re := range w.res {
@@ -134,9 +173,11 @@ func (w *TriggerWatcher) Scan(chunk []byte) {
 			if w.fire != nil {
 				go w.fire(matched) // 别在终端读循环里干重活
 			}
+			w.mu.Unlock()
 			return
 		}
 	}
+	w.mu.Unlock()
 }
 
 // HasPatterns reports whether the watcher has anything to scan for —
@@ -148,14 +189,13 @@ func (w *TriggerWatcher) HasPatterns() bool {
 }
 
 // TriggerView is the drawer managing the pattern list, on the terminal
-// page next to snippets.
+// page next to snippets. Its fields are the UI thread's alone; the list
+// it shows is triggerStore's.
 type TriggerView struct {
-	mu         sync.Mutex
-	watcher    *TriggerWatcher
-	open       bool
-	newPat     string
-	err        string
-	needReload bool
+	watcher *TriggerWatcher
+	open    bool
+	newPat  string
+	err     string
 }
 
 // NewTriggerView builds the drawer over the session's watcher.
@@ -164,21 +204,14 @@ func NewTriggerView(w *TriggerWatcher) *TriggerView {
 }
 
 // Open flips the drawer.
-func (v *TriggerView) Open() {
-	v.mu.Lock()
-	v.open = !v.open
-	v.mu.Unlock()
-}
+func (v *TriggerView) Open() { v.open = !v.open }
 
 // View builds the drawer when open.
 func (v *TriggerView) View(c *ui.Context) {
-	v.mu.Lock()
 	if !v.open {
-		v.mu.Unlock()
 		return
 	}
-	list := append([]Trigger(nil), v.watcher.list...)
-	v.mu.Unlock()
+	list, _ := triggers()
 	tk := theme.TokensOf(c)
 
 	feedback.Drawer(c, &v.open, feedback.DrawerProps{
@@ -191,7 +224,7 @@ func (v *TriggerView) View(c *ui.Context) {
 			}
 			for _, tr := range list {
 				tr := tr
-				row := ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(6).
+				row := ui.Row(c).Key(tr.ID).FillWidth().AlignItems(ui.Center).Gap(6).
 					Padding(6, 8).Radius(tk.BorderRadiusSM)
 				if row.Hovered() {
 					row.Background(tk.FillTertiary)
@@ -209,13 +242,9 @@ func (v *TriggerView) View(c *ui.Context) {
 			ui.Divider(c)
 			ui.Column(c).Gap(6).Children(func() {
 				ui.Text(c, "新模式").FontSize(12).Bold()
-				v.mu.Lock()
 				pat, err := v.newPat, v.err
-				v.mu.Unlock()
 				field.Input(c, &pat, field.InputProps{Placeholder: `正则,如 (?i)error|failed`})
-				v.mu.Lock()
 				v.newPat = pat
-				v.mu.Unlock()
 				if err != "" {
 					ui.Text(c, err).FontSize(11).TextColor(tk.Error)
 				}
@@ -228,9 +257,8 @@ func (v *TriggerView) View(c *ui.Context) {
 }
 
 // add compiles the pattern — a bad regex never leaves the form — then
-// puts it on the list and re-arms the watcher.
+// puts it on the list and re-arms the watchers.
 func (v *TriggerView) add() {
-	v.mu.Lock()
 	pat := v.newPat
 	if _, err := regexp.Compile(pat); pat == "" || err != nil {
 		if pat == "" {
@@ -238,27 +266,28 @@ func (v *TriggerView) add() {
 		} else {
 			v.err = "正则写错了: " + err.Error()
 		}
-		v.mu.Unlock()
 		return
 	}
-	list := append(v.watcher.list, Trigger{ID: newSnippetID(), Pattern: pat})
+	tr := Trigger{ID: newSnippetID(), Pattern: pat}
+	editTriggers(func(list []Trigger) []Trigger { return append(list, tr) })
 	v.newPat, v.err = "", ""
-	v.mu.Unlock()
-	saveTriggers(list)
-	v.watcher.Reload()
+	if v.watcher != nil {
+		v.watcher.Reload()
+	}
 }
 
-// remove drops the pattern with id and re-arms the watcher.
+// remove drops the pattern with id and re-arms the watchers.
 func (v *TriggerView) remove(id string) {
-	v.mu.Lock()
-	out := v.watcher.list[:0]
-	for _, tr := range v.watcher.list {
-		if tr.ID != id {
-			out = append(out, tr)
+	editTriggers(func(list []Trigger) []Trigger {
+		out := list[:0]
+		for _, tr := range list {
+			if tr.ID != id {
+				out = append(out, tr)
+			}
 		}
+		return out
+	})
+	if v.watcher != nil {
+		v.watcher.Reload()
 	}
-	list := append([]Trigger(nil), out...)
-	v.mu.Unlock()
-	saveTriggers(list)
-	v.watcher.Reload()
 }

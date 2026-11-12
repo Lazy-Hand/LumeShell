@@ -2,7 +2,6 @@ package filepanel
 
 import (
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"lumeshell/internal/sshclient"
@@ -17,9 +16,6 @@ import (
 	"github.com/lobehub/lobe-mygo/pkg/overlay"
 	"github.com/lobehub/lobe-mygo/pkg/theme"
 )
-
-// base is the last part of a path.
-func base(p string) string { return filepath.Base(p) }
 
 // View builds one column of the file browser: its toolbar, its listing
 // and its errors. `changed` redraws it with what the background
@@ -68,9 +64,10 @@ func View(c *ui.Context, p *Panel, changed func()) {
 				})
 			})
 		}
+		entries := p.Entries() // one copy for the whole frame
 		layout.ScrollArea(c, layout.ScrollAreaProps{Fade: true}, func() {
 			ui.Column(c).FillWidth().Padding(4).Gap(2).Children(func() {
-				for _, e := range p.Entries() {
+				for _, e := range entries {
 					entryView(c, p, e, changed, tk)
 				}
 				// 空白处也收右键:新建目录、刷新。
@@ -83,7 +80,7 @@ func View(c *ui.Context, p *Panel, changed func()) {
 				}
 			})
 		}).Grow(1)
-		if p.Loading() && len(p.Entries()) == 0 {
+		if p.Loading() && len(entries) == 0 {
 			ui.Row(c).FillWidth().Justify(ui.Center).Padding(12).Children(func() {
 				feedback.Spin(c, feedback.SpinProps{Size: theme.Small}, nil)
 			})
@@ -91,7 +88,7 @@ func View(c *ui.Context, p *Panel, changed func()) {
 		if sends := p.Sends(); len(sends) > 0 {
 			ui.Column(c).Gap(4).Padding(6, 10).Background(tk.BgContainer).Children(func() {
 				ui.Divider(c)
-				for _, s := range sends {
+				for i, s := range sends {
 					pct := float32(0)
 					if s.total > 0 {
 						pct = float32(s.done) / float32(s.total) * 100
@@ -106,6 +103,7 @@ func View(c *ui.Context, p *Panel, changed func()) {
 					} else if s.queued {
 						label = s.name + " · 排队中"
 					}
+					c.Key(i)
 					feedback.Progress(c, pct, feedback.ProgressProps{
 						Status:   status,
 						ShowInfo: true,
@@ -124,7 +122,7 @@ func View(c *ui.Context, p *Panel, changed func()) {
 // entryView is one row of the listing: its icon, name and, for a file,
 // its size and time, with a right-click menu of what the row can do.
 func entryView(c *ui.Context, p *Panel, e sshclient.Entry, changed func(), tk *theme.Tokens) {
-	row := ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Padding(5, 8).Radius(tk.BorderRadiusSM).
+	row := ui.Row(c).Key(e.Name).FillWidth().AlignItems(ui.Center).Gap(8).Padding(5, 8).Radius(tk.BorderRadiusSM).
 		Cursor(ui.CursorPointer).Transition(ui.ElementTransition{
 		Duration: 120 * time.Millisecond, Ease: ui.CubicBezier(0.32, 0.72, 0, 1), Colors: true,
 	})
@@ -162,7 +160,7 @@ func entryView(c *ui.Context, p *Panel, e sshclient.Entry, changed func(), tk *t
 			ui.Text(c, e.Name).FontSize(13).Grow(1).SingleLine()
 			if !e.IsDir {
 				ui.Text(c, size(e.Size)).FontSize(11).TextColor(tk.TextTertiary)
-				ui.Text(c, e.Moded.Format("01-02 15:04")).FontSize(11).TextColor(tk.TextTertiary)
+				ui.Text(c, e.ModTime.Format("01-02 15:04")).FontSize(11).TextColor(tk.TextTertiary)
 			}
 		})
 	})
@@ -222,7 +220,7 @@ func (p *Panel) dialogView(c *ui.Context, changed func()) {
 // closeDialogAct takes the dialog down and runs what it confirmed:
 // mkdir stages p.newDir for Mkdir, rename p.renameTo for DoRename.
 func (p *Panel) closeDialogAct(kind string, changed func()) {
-	p.Lock()
+	p.mu.Lock()
 	name := p.dlgValue
 	switch kind {
 	case "mkdir":
@@ -231,7 +229,7 @@ func (p *Panel) closeDialogAct(kind string, changed func()) {
 		p.renameTo = name
 	}
 	p.kind, p.dlgValue, p.dlgOpen = "", "", false
-	p.Unlock()
+	p.mu.Unlock()
 	switch kind {
 	case "mkdir":
 		p.Mkdir(changed)
@@ -256,10 +254,10 @@ func size(n int64) string {
 // stream with progress, directories recurse. Single-column panels
 // fall back to a save dialog for files.
 func (p *Panel) sendOut(name string, isDir bool) {
-	p.Lock()
+	p.mu.Lock()
 	other := p.other
 	dir := p.dir
-	p.Unlock()
+	p.mu.Unlock()
 	if other == nil {
 		if isDir {
 			return // 单列面板不支持保存整目录
@@ -269,7 +267,7 @@ func (p *Panel) sendOut(name string, isDir bool) {
 			if err != nil || dest == "" {
 				return
 			}
-			if err := p.fs.Send(join(dir, name), dest, LocalFS{}, nil); err != nil {
+			if err := p.fs.Send(p.fs.Join(dir, name), dest, LocalFS{}, nil); err != nil {
 				plistSay("传输失败", err.Error())
 			}
 		}()
@@ -280,9 +278,9 @@ func (p *Panel) sendOut(name string, isDir bool) {
 
 // kick refreshes the column's listing, for a transfer landing in it.
 func (p *Panel) kick() {
-	p.Lock()
+	p.mu.Lock()
 	changed := p.onChanged
-	p.Unlock()
+	p.mu.Unlock()
 	if changed != nil {
 		changed()
 	}
@@ -291,9 +289,9 @@ func (p *Panel) kick() {
 // SetOther wires `other` as the column this one sends files to, and
 // changed as how this column redraws itself.
 func (p *Panel) SetOther(other *Panel, changed func()) {
-	p.Lock()
+	p.mu.Lock()
 	p.other, p.onChanged = other, changed
-	p.Unlock()
+	p.mu.Unlock()
 }
 
 // plistSay is how the panel reports transfer failures: mygo.Dialog

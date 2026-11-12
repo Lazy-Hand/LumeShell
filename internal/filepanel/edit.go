@@ -13,11 +13,11 @@ import (
 // It runs on its own goroutine; the temp file is removed when the
 // editor closes or the app exits.
 func (p *Panel) editOnline(name string) {
-	p.Lock()
+	p.mu.Lock()
 	dir, fs := p.dir, p.fs
 	changed := p.onChanged
-	p.Unlock()
-	src := join(dir, name)
+	p.mu.Unlock()
+	src := fs.Join(dir, name)
 	go func() {
 		tmp, err := os.CreateTemp("", "lumeshell-edit-*"+filepath.Ext(name))
 		if err != nil {

@@ -11,11 +11,11 @@ import (
 
 // Entry is one file or directory of the remote, as the panel shows it.
 type Entry struct {
-	Name  string
-	Size  int64
-	Mode  os.FileMode
-	Moded time.Time
-	IsDir bool
+	Name    string
+	Size    int64
+	Mode    os.FileMode
+	ModTime time.Time
+	IsDir   bool
 }
 
 // WriterFor is the writing half of a file channel: local and remote
@@ -49,7 +49,7 @@ func (fs *SFTP) Close() error {
 	return fs.cl.Close()
 }
 
-// ReadDir lists a directory, sorted with directories first.
+// ReadDir lists a directory; the panel sorts it, directories first.
 func (fs *SFTP) ReadDir(path string) ([]Entry, error) {
 	infos, err := fs.cl.ReadDir(path)
 	if err != nil {
@@ -58,11 +58,11 @@ func (fs *SFTP) ReadDir(path string) ([]Entry, error) {
 	out := make([]Entry, 0, len(infos))
 	for _, in := range infos {
 		out = append(out, Entry{
-			Name:  in.Name(),
-			Size:  in.Size(),
-			Mode:  in.Mode(),
-			Moded: in.ModTime(),
-			IsDir: in.IsDir(),
+			Name:    in.Name(),
+			Size:    in.Size(),
+			Mode:    in.Mode(),
+			ModTime: in.ModTime(),
+			IsDir:   in.IsDir(),
 		})
 	}
 	return out, nil
@@ -82,39 +82,6 @@ func (fs *SFTP) Join(dir, name string) string { return fs.cl.Join(dir, name) }
 
 // Home is the user's home on the host, where a panel starts.
 func (fs *SFTP) Home() (string, error) { return fs.cl.RealPath(".") }
-
-// Download copies a remote file to the local path dest.
-func (fs *SFTP) Download(remote, dest string) error {
-	if err := fs.get(remote, dest); err != nil {
-		return err
-	}
-	_ = os.Chmod(dest, 0o700)
-	return nil
-}
-
-func (fs *SFTP) get(remote, dest string) error {
-	in, err := fs.cl.Open(remote)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	st, err := in.Stat()
-	if err != nil {
-		return err
-	}
-	if st.IsDir() {
-		return fmt.Errorf("%s is a directory", remote)
-	}
-	out, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return fmt.Errorf("copy %s: %w", remote, err)
-	}
-	return out.Close()
-}
 
 // Send copies this channel's remote file at src into the destination
 // channel's writer at remote, streaming so progress reports as bytes

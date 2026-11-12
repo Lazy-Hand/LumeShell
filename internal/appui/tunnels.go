@@ -55,17 +55,15 @@ func (t *TunnelView) View(c *ui.Context) {
 			live := t.conn.Tunnels()
 			if len(live) > 0 {
 				ui.Column(c).Gap(4).Children(func() {
-					for i := range live {
-						tn := live[i]
+					for _, tn := range live {
 						ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 							display.Tag(c, tn.Kind, display.TagProps{Size: theme.Small})
 							ui.Text(c, tn.Bind).FontSize(13).Grow(1).SingleLine()
 							if tn.Target != "" {
 								ui.Text(c, "→ "+tn.Target).FontSize(12).TextColor(theme.TokensOf(c).TextSecondary).SingleLine()
 							}
-							idx := i
 							if action.ActionIcon(c, lucide.X(), action.ActionIconProps{Title: "关闭"}).Clicked() {
-								t.conn.CloseTunnel(&live[idx])
+								t.conn.CloseTunnel(tn)
 							}
 						})
 					}

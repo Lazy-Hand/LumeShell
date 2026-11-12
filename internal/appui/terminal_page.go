@@ -103,10 +103,8 @@ type FilesPage struct {
 	Remote    *filepanel.Panel // the server's files
 	Local     *filepanel.Panel // this machine's files
 	SideWidth float32          // the local column's width
-	Closed    bool             // the middle's 收起, one column each side
 
-	// Back runs when the user leaves the browser; Upload and Download
-	// run with a local path and the remote panel's directory.
+	// Back runs when the user leaves the browser.
 	Back func()
 }
 
@@ -142,16 +140,17 @@ type Hub struct {
 	Tunnels *TunnelView // the session's port forwards, when one is up
 	Now     Page
 	Win     *mygo.Window
-	Store   *profiles.Store
 }
 
 // View builds the page the hub shows.
 func (h *Hub) View(c *ui.Context) {
-	if h.Tunnels != nil {
-		h.Tunnels.View(c) // 对话框浮在任意页上
-	}
 	switch h.Now {
 	case Session:
+		// The tunnel dialog belongs to the session whose page is up, so
+		// it is drawn here and cleared with the page.
+		if h.Tunnels != nil {
+			h.Tunnels.View(c)
+		}
 		if h.Term != nil {
 			h.Term.View(c)
 		}

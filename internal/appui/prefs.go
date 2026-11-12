@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"lumeshell/internal/atomicfile"
+
 	"github.com/egoist/mygo"
 )
 
@@ -56,13 +58,5 @@ func SaveThemeSource(s mygo.ThemeSource) {
 	if path == "" {
 		return
 	}
-	data, err := json.Marshal(prefFile{Theme: string(s)})
-	if err != nil {
-		return
-	}
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	tmp := path + ".tmp"
-	if os.WriteFile(tmp, data, 0o600) == nil {
-		_ = os.Rename(tmp, path)
-	}
+	_ = atomicfile.WriteJSON(path, prefFile{Theme: string(s)})
 }

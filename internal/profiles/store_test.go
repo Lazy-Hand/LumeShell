@@ -35,9 +35,6 @@ func TestSaveAndList(t *testing.T) {
 	if got := s.List(); len(got) != 1 || got[0].Host != "example.com" {
 		t.Fatalf("List = %+v", got)
 	}
-	if got := s.Selected(); got != p.ID {
-		t.Fatalf("Selected = %q, want %q", got, p.ID)
-	}
 }
 
 func TestSVOrderAfterBothUsed(t *testing.T) {
@@ -74,29 +71,20 @@ func TestIncompleteRejected(t *testing.T) {
 	}
 }
 
-func TestLRULimit(t *testing.T) {
+func TestNoProfileIsDropped(t *testing.T) {
+	// 保存的主机都留着:静默淘汰会删掉用户的配置。
 	s, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids := map[string]string{}
-	for i := 0; i < Limit+2; i++ {
-		time.Sleep(2 * time.Millisecond)
-		p, err := s.Save(Profile{Host: string(rune('a' + i)), User: "u", Auth: Password})
-		if err != nil {
+	for i := 0; i < 25; i++ {
+		time.Sleep(time.Millisecond)
+		if _, err := s.Save(Profile{Host: string(rune('a' + i)), User: "u", Auth: Password}); err != nil {
 			t.Fatal(err)
 		}
-		ids[p.Host] = p.ID
 	}
-	got := s.List()
-	if len(got) != Limit {
-		t.Fatalf("List = %d profiles, want %d", len(got), Limit)
-	}
-	if _, ok := s.byID[ids["a"]]; ok {
-		t.Fatal("the least recently used profile 'a' is still there")
-	}
-	if got[0].Host != string(rune('a'+Limit+1)) {
-		t.Fatalf("List[0] = %s, want the newest", got[0].Host)
+	if got := s.List(); len(got) != 25 {
+		t.Fatalf("List = %d profiles, want 25", len(got))
 	}
 }
 
@@ -156,7 +144,29 @@ func TestRemove(t *testing.T) {
 	if got := s.List(); len(got) != 0 {
 		t.Fatalf("List = %d profiles after Remove", len(got))
 	}
-	if got := s.Selected(); got != "" {
-		t.Fatalf("Selected = %q after Remove", got)
+}
+
+func TestRecencySurvivesReload(t *testing.T) {
+	// 重启后列表仍按最后使用排序:LastUsed 得从磁盘回来,不能拿
+	// CreatedAt 顶替。
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := s.Save(Profile{Host: "a", User: "u", Auth: Password})
+	time.Sleep(2 * time.Millisecond)
+	s.Save(Profile{Host: "b", User: "u", Auth: Password})
+	time.Sleep(2 * time.Millisecond)
+	if err := s.Touch(a.ID); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := s2.List()
+	if len(got) != 2 || got[0].Host != "a" {
+		t.Fatalf("List after reload = %+v, want a first", got)
 	}
 }

@@ -2,6 +2,7 @@ package appui
 
 import (
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"lumeshell/internal/profiles"
@@ -19,6 +20,7 @@ func newList(t *testing.T) (*List, *profiles.Store, *connectSpy) {
 	}
 	l := NewList(s)
 	spy := &connectSpy{list: l}
+	l.Confirm = func(string, string, string) bool { return true }
 	l.Connect = spy.connect
 	l.Delete = func(p profiles.Profile) {
 		spy.deleted = append(spy.deleted, p.ID)
@@ -91,6 +93,11 @@ func TestDeleteRemovesCard(t *testing.T) {
 	if err := tt.Click("删除"); err != nil {
 		t.Fatal(err)
 	}
+	// 确认在另一个 goroutine 上,点完那一刻删还没发生。
+	deadline := time.Now().Add(time.Second)
+	for len(spy.deleted) == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if len(spy.deleted) != 1 || spy.deleted[0] != saved.ID {
 		t.Fatalf("deleted = %v, want the card's profile", spy.deleted)
 	}
@@ -143,5 +150,23 @@ func TestFormRejectsEmptyHost(t *testing.T) {
 	}
 	if !tt.HasText("no host") {
 		t.Errorf("texts %q lack the error", tt.Texts())
+	}
+}
+
+func TestDeleteAsksFirst(t *testing.T) {
+	l, s, spy := newList(t)
+	saved, _ := s.Save(profiles.Profile{Host: "h", User: "u", Auth: profiles.Password})
+	l.Confirm = func(string, string, string) bool { return false }
+	tt := uiTester(l.View)
+	if err := tt.Click("删除"); err != nil {
+		t.Fatal(err)
+	}
+	// 确认在别的 goroutine 上跑;它拒绝时什么也不该发生。
+	time.Sleep(50 * time.Millisecond)
+	if len(spy.deleted) != 0 {
+		t.Fatalf("deleted %v without confirmation", spy.deleted)
+	}
+	if got := s.List(); len(got) != 1 || got[0].ID != saved.ID {
+		t.Fatalf("store lost the profile: %+v", got)
 	}
 }

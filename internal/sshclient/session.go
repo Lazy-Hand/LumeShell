@@ -3,6 +3,7 @@ package sshclient
 import (
 	"fmt"
 	"io"
+	"sync"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -15,11 +16,11 @@ type Session struct {
 	// stdin takes what Write writes; stdout is what Read reads.
 	stdin  io.WriteCloser
 	stdout io.Reader
-	// errChan takes the session's end: the program's exit or the
-	// connection's.
-	errChan chan error
 	// eof closes when the session has ended, so Read can report its end.
 	eof chan struct{}
+	// mu guards end, the error of the end, which Read and main both read.
+	mu  sync.Mutex
+	end error
 }
 
 // terminalTerm is the terminal type the remote sees, one libghostty-vt
@@ -54,7 +55,7 @@ func (c *Client) Shell(cols, rows int) (*Session, error) {
 	}
 	// Over a PTY the system merges stderr into the terminal, so stdout
 	// alone is read here.
-	s := &Session{sess: sess, stdin: stdin, stdout: stdout, errChan: make(chan error, 1), eof: make(chan struct{})}
+	s := &Session{sess: sess, stdin: stdin, stdout: stdout, eof: make(chan struct{})}
 	if err := s.start(); err != nil {
 		sess.Close()
 		return nil, err
@@ -70,7 +71,10 @@ func (s *Session) start() error {
 		return err
 	}
 	go func() {
-		s.errChan <- s.sess.Wait()
+		err := s.sess.Wait()
+		s.mu.Lock()
+		s.end = err
+		s.mu.Unlock()
 		close(s.eof)
 	}()
 	return nil
@@ -84,9 +88,24 @@ func (s *Session) Read(p []byte) (int, error) {
 		// while the shell is still running waits for it, as closing the
 		// window ends it.
 		<-s.eof
+		if e := s.EndErr(); e != nil {
+			return 0, e
+		}
 		return 0, io.EOF
 	}
 	return n, err
+}
+
+// EndErr is why the session ended, once it has: nil for a shell that
+// exited cleanly, an *ssh.ExitError for a program that exited wrong, and
+// the transport's error for a connection that dropped.
+func (s *Session) EndErr() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.end
 }
 
 // Write writes what the user typed to the remote program.
@@ -110,7 +129,3 @@ func (s *Session) Resize(cols, rows int) error {
 	_ = s.sess.WindowChange(rows, cols)
 	return nil
 }
-
-// Done reports the session's end, with the exit error or the
-// connection's.
-func (s *Session) Done() <-chan error { return s.errChan }

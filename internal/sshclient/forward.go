@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 )
 
@@ -40,21 +41,22 @@ type tunnels struct {
 }
 
 func (c *Client) tunnels() *tunnels {
-	if c.fwds == nil {
-		c.fwds = &tunnels{}
-	}
+	c.fwdsOnce.Do(func() {
+		if c.fwds == nil {
+			c.fwds = &tunnels{}
+		}
+	})
 	return c.fwds
 }
 
-// Tunnels lists the forwards still running.
-func (c *Client) Tunnels() []Tunnel {
+// Tunnels lists the forwards still running, for the tunnel view. The
+// pointers are what CloseTunnel takes back.
+func (c *Client) Tunnels() []*Tunnel {
 	t := c.tunnels()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := make([]Tunnel, 0, len(t.list))
-	for _, tn := range t.list {
-		out = append(out, *tn)
-	}
+	out := make([]*Tunnel, len(t.list))
+	copy(out, t.list)
 	return out
 }
 
@@ -186,7 +188,7 @@ func (c *Client) serveSocks(conn net.Conn) {
 		return
 	}
 	port := int(buf[0])<<8 | int(buf[1])
-	rc, err := c.ssh.Dial("tcp", net.JoinHostPort(host, fmt.Sprint(port)))
+	rc, err := c.ssh.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		conn.Write([]byte{5, 5, 0, 1, 0, 0, 0, 0, 0, 0}) // connection refused
 		return

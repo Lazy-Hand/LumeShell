@@ -8,15 +8,18 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
 
-// Auth is one way to prove the user's identity to a server.
+// Auth is one way to prove the user's identity to a server. methods may
+// hold a resource open for the connection, as the ssh-agent's socket,
+// and returns it as a closer for the Client to close with the connection.
 type Auth interface {
-	methods() ([]ssh.AuthMethod, error)
+	methods() (auths []ssh.AuthMethod, closer io.Closer, err error)
 }
 
 // PasswordAuth proves identity with the user's password. It also answers
@@ -38,7 +41,7 @@ type KeyAuth struct {
 // saved password or key still wins when the server takes either.
 type AgentAuth struct{}
 
-func (a PasswordAuth) methods() ([]ssh.AuthMethod, error) {
+func (a PasswordAuth) methods() ([]ssh.AuthMethod, io.Closer, error) {
 	return []ssh.AuthMethod{
 		ssh.Password(a.Password),
 		ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
@@ -51,40 +54,42 @@ func (a PasswordAuth) methods() ([]ssh.AuthMethod, error) {
 			}
 			return out, nil
 		}),
-	}, nil
+	}, nil, nil
 }
 
-func (a KeyAuth) methods() ([]ssh.AuthMethod, error) {
+func (a KeyAuth) methods() ([]ssh.AuthMethod, io.Closer, error) {
 	key, err := loadKey(a.KeyPath, []byte(a.Passphrase))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	signer, err := ssh.NewSignerFromKey(key)
 	if err != nil {
-		return nil, fmt.Errorf("key %s: %w", a.KeyPath, err)
+		return nil, nil, fmt.Errorf("key %s: %w", a.KeyPath, err)
 	}
-	return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil
+	return []ssh.AuthMethod{ssh.PublicKeys(signer)}, nil, nil
 }
 
-func (AgentAuth) methods() ([]ssh.AuthMethod, error) {
+func (AgentAuth) methods() ([]ssh.AuthMethod, io.Closer, error) {
 	sock := os.Getenv("SSH_AUTH_SOCK")
 	if sock == "" {
-		return nil, nil // 没有 agent 在跑,什么也不加
+		return nil, nil, nil // 没有 agent 在跑,什么也不加
 	}
 	conn, err := net.Dial("unix", sock)
 	if err != nil {
-		return nil, fmt.Errorf("ssh-agent: %w", err)
+		return nil, nil, fmt.Errorf("ssh-agent: %w", err)
 	}
 	signers, err := agent.NewClient(conn).Signers()
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("ssh-agent list: %w", err)
+		return nil, nil, fmt.Errorf("ssh-agent list: %w", err)
 	}
 	if len(signers) == 0 {
 		conn.Close()
-		return nil, nil
+		return nil, nil, nil
 	}
-	return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, nil
+	// The signers sign through conn while the connection authenticates,
+	// so it stays open until the Client that used it closes.
+	return []ssh.AuthMethod{ssh.PublicKeys(signers...)}, conn, nil
 }
 
 // loadKey reads a PEM private key file, decrypting it with passphrase
@@ -128,6 +133,12 @@ type Config struct {
 	Auth    Auth
 	Jump    *Jump         // empty: dial the target directly
 	Timeout time.Duration // empty: 10s
+
+	// HostKey verifies the server's key before the connection carries
+	// anything. Empty checks the user's known_hosts and trusts no new
+	// host, which is what Connect alone can do; the app passes one that
+	// offers a new key to the user.
+	HostKey ssh.HostKeyCallback
 }
 
 // Client is a connected SSH server. It yields its shell session to the
@@ -135,28 +146,53 @@ type Config struct {
 // one connection; when a jump host carried the dial, closer keeps its
 // SSH client too, so Close ends both.
 type Client struct {
-	ssh    *ssh.Client
-	closer io.Closer
-	fwds   *tunnels
-	Conf   Config
+	ssh      *ssh.Client
+	closer   io.Closer
+	fwds     *tunnels
+	fwdsOnce sync.Once
+	auth     []io.Closer // sockets the auth methods signed through
+}
+
+// hostKey is the callback the handshake uses: Config's own, or the
+// known_hosts check that trusts nothing new.
+func (c Config) hostKey() ssh.HostKeyCallback {
+	if c.HostKey != nil {
+		return c.HostKey
+	}
+	return HostKeys(nil)
 }
 
 // authMethods is the auth chain for a Config: the profile's own ways
-// first, the ssh-agent after.
-func (c Config) authMethods() ([]ssh.AuthMethod, error) {
-	var auths []ssh.AuthMethod
-	if c.Auth != nil {
-		var err error
-		if auths, err = c.Auth.methods(); err != nil {
-			return nil, err
-		}
-	} else {
-		return nil, errors.New("no authentication configured")
+// first, the ssh-agent after. The closers hold what the methods need
+// while they authenticate, and are closed with the connection.
+func (c Config) authMethods() ([]ssh.AuthMethod, []io.Closer, error) {
+	if c.Auth == nil {
+		return nil, nil, errors.New("no authentication configured")
 	}
-	if extra, err := (AgentAuth{}).methods(); err == nil {
+	auths, closer, err := c.Auth.methods()
+	if err != nil {
+		return nil, nil, err
+	}
+	var closers []io.Closer
+	if closer != nil {
+		closers = append(closers, closer)
+	}
+	if extra, ec, err := (AgentAuth{}).methods(); err == nil {
 		auths = append(auths, extra...)
+		if ec != nil {
+			closers = append(closers, ec)
+		}
 	}
-	return auths, nil
+	return auths, closers, nil
+}
+
+// closeAll closes every closer, ignoring their errors.
+func closeAll(closers []io.Closer) {
+	for _, c := range closers {
+		if c != nil {
+			c.Close()
+		}
+	}
 }
 
 // dial returns a live transport to conf's SSH port: direct TCP, or a
@@ -164,7 +200,10 @@ func (c Config) authMethods() ([]ssh.AuthMethod, error) {
 func (c Config) dial() (net.Conn, io.Closer, error) {
 	if c.Jump == nil {
 		conn, err := net.DialTimeout("tcp", net.JoinHostPort(c.Host, c.Port), c.Timeout)
-		return conn, conn, err
+		if err != nil {
+			return nil, nil, err
+		}
+		return conn, conn, nil
 	}
 	jumpConf := Config{
 		Host:    c.Jump.Host,
@@ -172,43 +211,51 @@ func (c Config) dial() (net.Conn, io.Closer, error) {
 		User:    c.Jump.User,
 		Auth:    c.Jump.Auth,
 		Timeout: c.Timeout,
+		HostKey: c.HostKey,
 	}
-	auths, err := jumpConf.authMethods()
+	auths, authClosers, err := jumpConf.authMethods()
 	if err != nil {
 		return nil, nil, fmt.Errorf("jump auth: %w", err)
 	}
 	jc, err := net.DialTimeout("tcp", net.JoinHostPort(jumpConf.Host, jumpConf.Port), c.Timeout)
 	if err != nil {
+		closeAll(authClosers)
 		return nil, nil, fmt.Errorf("dial jump %s:%s: %w", jumpConf.Host, jumpConf.Port, err)
 	}
 	jConn, jChans, jReqs, err := ssh.NewClientConn(jc, net.JoinHostPort(jumpConf.Host, jumpConf.Port), &ssh.ClientConfig{
 		User:            jumpConf.User,
 		Auth:            auths,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: jumpConf.hostKey(),
 		Timeout:         c.Timeout,
 	})
 	if err != nil {
 		jc.Close()
+		closeAll(authClosers)
 		return nil, nil, fmt.Errorf("connect jump %s@%s:%s: %w", jumpConf.User, jumpConf.Host, jumpConf.Port, err)
 	}
 	jump := ssh.NewClient(jConn, jChans, jReqs)
 	conn, err := jump.Dial("tcp", net.JoinHostPort(c.Host, c.Port))
 	if err != nil {
 		jump.Close()
+		closeAll(authClosers)
 		return nil, nil, fmt.Errorf("dial %s:%s via jump: %w", c.Host, c.Port, err)
 	}
-	return conn, &jumpCloser{conn, jump}, nil
+	return conn, &jumpCloser{Conn: conn, jump: jump, closers: authClosers}, nil
 }
 
-// jumpCloser closes the inner channel then the jump's client.
+// jumpCloser closes the inner channel, the jump's client, and what the
+// jump's auth held open.
 type jumpCloser struct {
 	net.Conn
-	jump *ssh.Client
+	jump    *ssh.Client
+	closers []io.Closer
 }
 
 func (j *jumpCloser) Close() error {
-	j.Conn.Close()
-	return j.jump.Close()
+	err := j.Conn.Close()
+	j.jump.Close()
+	closeAll(j.closers)
+	return err
 }
 
 // Connect dials the server and authenticates the user.
@@ -219,25 +266,27 @@ func Connect(conf Config) (*Client, error) {
 	if conf.Timeout == 0 {
 		conf.Timeout = 10 * time.Second
 	}
-	auths, err := conf.authMethods()
+	auths, authClosers, err := conf.authMethods()
 	if err != nil {
 		return nil, err
 	}
 	conn, closer, err := conf.dial()
 	if err != nil {
+		closeAll(authClosers)
 		return nil, err
 	}
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, net.JoinHostPort(conf.Host, conf.Port), &ssh.ClientConfig{
 		User:            conf.User,
 		Auth:            auths,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: known_hosts
+		HostKeyCallback: conf.hostKey(),
 		Timeout:         conf.Timeout,
 	})
 	if err != nil {
 		closer.Close()
+		closeAll(authClosers)
 		return nil, fmt.Errorf("connect %s@%s:%s: %w", conf.User, conf.Host, conf.Port, err)
 	}
-	client := &Client{ssh: ssh.NewClient(sshConn, chans, reqs), closer: closer, Conf: conf}
+	client := &Client{ssh: ssh.NewClient(sshConn, chans, reqs), closer: closer, fwds: &tunnels{}, auth: authClosers}
 	go client.keepalive(30 * time.Second)
 	return client, nil
 }
@@ -254,15 +303,18 @@ func (c *Client) keepalive(every time.Duration) {
 	}
 }
 
-// Close ends the connection and everything on it, the jump host's too.
+// Close ends the connection and everything on it: the jump host's too,
+// and the sockets its auth signed through.
 func (c *Client) Close() error {
 	if c == nil || c.ssh == nil {
 		return nil
 	}
 	c.CloseTunnels()
 	err := c.ssh.Close()
-	if c.closer != nil && c.closer != c.ssh {
+	if c.closer != nil {
 		c.closer.Close()
 	}
+	closeAll(c.auth)
+	c.auth = nil
 	return err
 }

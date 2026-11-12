@@ -7,6 +7,7 @@ package filepanel
 import (
 	"fmt"
 	"path"
+	"sort"
 	"sync"
 
 	"lumeshell/internal/sshclient"
@@ -23,6 +24,9 @@ type fileChan interface {
 	Mkdir(dir string) error
 	Remove(path string) error
 	Rename(from, to string) error
+	// Join joins a directory with a name the way the channel's file
+	// system does.
+	Join(dir, name string) string
 	// Send copies this channel's file at src into dst's writer at
 	// remote; report hears done of total bytes as they go, nil for none.
 	// dst is the other column's channel, reached by its WriterFor.
@@ -32,74 +36,58 @@ type fileChan interface {
 
 // Panel is one session's file browser. IsRemote marks the server side,
 // which alone offers 编辑 (在线编辑远端文件).
+//
+// Every field behind mu is touched from background goroutines: the
+// listing they load, the transfers they run, and the counts they report.
+// The dialog fields are the UI thread's alone.
 type Panel struct {
-	sync.Mutex
+	mu        sync.Mutex
 	fs        fileChan
 	IsRemote  bool
 	dir       string
 	entries   []sshclient.Entry
-	loading   map[string]bool   // a ReadDir is up for a dir
-	err       error             // the last listing's failure
-	newDir    string            // the name the new directory dialog takes
-	rename    string            // the name the rename dialog edits
-	renameTo  string            // what the rename dialog renamed it to
-	other     *Panel            // the column across, taking what this sends
-	onChanged func()            // how this column redraws itself
-	sendSeq   int               // the key of the next transfer
-	sends     map[int]*transfer // the transfers in flight, for the view
-	queue     chan struct{}     // 并发槽:占住才发,免得大文件互抢带宽
+	loading   map[string]bool // a ReadDir is up for a dir
+	errStr    string          // the last listing's failure
+	gen       int             // grows per Open; older results are dropped
+	newDir    string          // the name Mkdir takes
+	rename    string          // the name DoRename renames
+	renameTo  string          // what it renames it to
+	other     *Panel          // the column across, taking what this sends
+	onChanged func()          // how this column redraws itself
+	sendSeq   int             // the key of the next transfer
+	sends     map[int]*transfer
+	queue     chan struct{} // 并发槽:占住才发,免得大文件互抢带宽
 
 	// 小对话框:新建目录、重命名。kind 说明它为什么开着,dlgValue
-	// 是它编辑的名字,dlgOpen 让 Modal 显示它。
+	// 是它编辑的名字,dlgOpen 让 Modal 显示它。只由 UI 线程读写。
 	kind     string
 	dlgValue string
 	dlgOpen  bool
 }
 
-// dialog is what the open dialog shows: its title and the buffer it
-// edits.
-func (p *Panel) dialog() (title, value string) {
-	p.Lock()
-	defer p.Unlock()
-	return p.kind, p.dlgValue
-}
-
-// dialogKind is what the open dialog is for: mkdir or rename.
-func (p *Panel) dialogKindName() string {
-	p.Lock()
-	defer p.Unlock()
-	return p.kind
-}
+// dialogKindName is what the open dialog is for: mkdir or rename.
+func (p *Panel) dialogKindName() string { return p.kind }
 
 // dialogOpen says a dialog of the panel is up.
-func (p *Panel) dialogOpen() bool {
-	p.Lock()
-	defer p.Unlock()
-	return p.dlgOpen
-}
+func (p *Panel) dialogOpen() bool { return p.dlgOpen }
 
-// openDialog stages a dialog: kind says why (mkdir or rename), title
-// what it shows.
+// openDialog stages a dialog: kind says why (mkdir or rename).
 func (p *Panel) openDialog(kind, title string) {
-	p.Lock()
 	p.kind, p.dlgValue, p.dlgOpen = kind, "", true
-	p.Unlock()
 }
 
 // openRename stages the rename dialog for the entry named: it keeps
 // `rename` for DoRename, and the input starts with the name as it is.
 func (p *Panel) openRename(name string) {
-	p.Lock()
+	p.mu.Lock()
 	p.rename = name
+	p.mu.Unlock()
 	p.kind, p.dlgValue, p.dlgOpen = "rename", name, true
-	p.Unlock()
 }
 
 // closeDialog takes the dialog down without acting on it.
 func (p *Panel) closeDialog() {
-	p.Lock()
 	p.kind, p.dlgValue, p.dlgOpen = "", "", false
-	p.Unlock()
 }
 
 // dialogFlag is the pointer Modal watches: the flag lives on the panel,
@@ -112,14 +100,13 @@ func (p *Panel) dialogBuffer() *string { return &p.dlgValue }
 
 // New makes a panel over the file channel.
 func New(fs fileChan, home string) *Panel {
-	p := &Panel{
+	return &Panel{
 		fs:      fs,
 		dir:     home,
 		loading: map[string]bool{},
 		sends:   map[int]*transfer{},
 		queue:   make(chan struct{}, 2), // 同时最多两条传输在跑
 	}
-	return p
 }
 
 // transfer is one send landing on a panel: its name, how much of it has
@@ -144,41 +131,44 @@ type dragItem struct {
 
 // Sends is the transfers in flight, in the order they started: the view
 // draws one progress line for each. A finished one keeps a full bar, a
-// failed one its error, until the listing changes them away.
+// failed one its error, until the next transfer starts.
 func (p *Panel) Sends() []transfer {
-	p.Lock()
-	defer p.Unlock()
-	out := make([]transfer, 0, len(p.sends))
-	for i := 1; i <= p.sendSeq; i++ {
-		if t, ok := p.sends[i]; ok {
-			out = append(out, *t)
-		}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ids := make([]int, 0, len(p.sends))
+	for id := range p.sends {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	out := make([]transfer, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, *p.sends[id])
 	}
 	return out
 }
 
-// ClearSends drops the finished and failed transfers the view shows.
-func (p *Panel) ClearSends() {
-	p.Lock()
+// dropFinishedLocked forgets the transfers that ended. p.mu is held.
+func (p *Panel) dropFinishedLocked() {
 	for k, t := range p.sends {
-		if t.err != "" || t.done >= t.total {
+		if t.err != "" || (t.total >= 0 && t.done >= t.total) {
 			delete(p.sends, k)
 		}
 	}
-	p.Unlock()
 }
 
 // Dir returns the directory shown.
-func (p *Panel) Dir() string {
-	p.Lock()
-	defer p.Unlock()
+func (p *Panel) Dir() string { return p.dirNow() }
+
+func (p *Panel) dirNow() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.dir
 }
 
 // Entries is the listing shown, sorted with directories first.
 func (p *Panel) Entries() []sshclient.Entry {
-	p.Lock()
-	defer p.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	out := make([]sshclient.Entry, len(p.entries))
 	copy(out, p.entries)
 	return out
@@ -186,68 +176,74 @@ func (p *Panel) Entries() []sshclient.Entry {
 
 // Loading says whether the current directory is coming.
 func (p *Panel) Loading() bool {
-	p.Lock()
-	defer p.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.loading[p.dir]
 }
 
 // Err is the listing's last failure, empty when all is well.
 func (p *Panel) Err() string {
-	p.Lock()
-	defer p.Unlock()
-	if p.err == nil {
-		return ""
-	}
-	return p.err.Error()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.errStr
 }
 
-// Open loads the directory and its listing off the UI, and Changed
-// redraws the panel as things arrive.
+// Open loads the directory and its listing off the UI, and changed
+// redraws the panel as things arrive. A listing that a newer Open has
+// overtaken is dropped, so a slow directory never rolls the panel back
+// to what the user left.
 func (p *Panel) Open(dir string, changed func()) {
-	p.Lock()
+	p.mu.Lock()
 	if p.loading[dir] {
-		p.Unlock()
+		p.mu.Unlock()
 		return
 	}
 	p.loading[dir] = true
-	p.err = nil
-	p.Unlock()
+	p.gen++
+	gen := p.gen
+	p.mu.Unlock()
 	go func() {
 		entries, err := p.fs.ReadDir(dir)
-		p.Lock()
+		p.mu.Lock()
 		delete(p.loading, dir)
+		if p.gen != gen {
+			p.mu.Unlock()
+			return // a newer Open is on its way
+		}
 		if err != nil {
-			p.err = err
-			p.Unlock()
+			p.errStr = err.Error()
 		} else {
 			sortEntries(entries)
-			p.dir, p.entries, p.err = dir, entries, nil
-			p.Unlock()
+			p.dir, p.entries, p.errStr = dir, entries, ""
 		}
-		changed()
+		p.mu.Unlock()
+		if changed != nil {
+			changed()
+		}
 	}()
 }
 
 // Refresh loads the current directory again.
-func (p *Panel) Refresh(changed func()) { p.Open(p.dir, changed) }
+func (p *Panel) Refresh(changed func()) { p.Open(p.dirNow(), changed) }
 
 // Visit descends into a directory of the listing.
 func (p *Panel) Visit(name string, changed func()) {
-	p.Open(join(p.dir, name), changed)
+	p.Open(p.join(p.dirNow(), name), changed)
 }
 
 // Rename renames the entry of the listing named to a new name.
 func (p *Panel) Rename(name, to string) error {
-	return p.fs.Rename(join(p.dir, name), join(p.dir, to))
+	dir := p.dirNow()
+	return p.fs.Rename(p.join(dir, name), p.join(dir, to))
 }
 
 // DoRename runs the rename this panel has staged, in the background,
 // and reports how it went.
 func (p *Panel) DoRename(changed func()) {
-	p.Lock()
+	p.mu.Lock()
 	from, to := p.rename, p.renameTo
 	p.rename, p.renameTo = "", ""
-	p.Unlock()
+	p.mu.Unlock()
 	if from == "" || to == "" || to == from {
 		return
 	}
@@ -259,14 +255,15 @@ func (p *Panel) DoRename(changed func()) {
 			}
 			return
 		}
-		p.Open(p.dir, changed)
+		p.Open(p.dirNow(), changed)
 	}()
 }
 
 // Parent goes up one directory, if there is room to.
 func (p *Panel) Parent(changed func()) {
-	up := path.Dir(p.dir)
-	if up != p.dir {
+	dir := p.dirNow()
+	up := path.Dir(dir)
+	if up != dir {
 		p.Open(up, changed)
 	}
 }
@@ -274,89 +271,95 @@ func (p *Panel) Parent(changed func()) {
 // Mkdir makes the staged directory in the one shown, in the background,
 // reports how it went, and reloads the listing.
 func (p *Panel) Mkdir(changed func()) {
-	p.Lock()
-	name := p.newDir
+	p.mu.Lock()
+	name, dir := p.newDir, p.dir
 	p.newDir = ""
-	p.Unlock()
+	p.mu.Unlock()
 	if name == "" {
 		return
 	}
 	go func() {
-		if err := p.fs.Mkdir(join(p.dir, name)); err != nil {
+		if err := p.fs.Mkdir(p.join(dir, name)); err != nil {
 			plistSay("新建目录失败", err.Error())
 			if changed != nil {
 				changed()
 			}
 			return
 		}
-		p.Open(p.dir, changed)
+		p.Open(dir, changed)
 	}()
 }
 
-// Remove deletes the entry of the listing named, file or empty dir,
-// and reloads the listing once it is gone.
+// Remove deletes the entry of the listing named, file or empty dir, and
+// reloads the listing once it is gone.
 func (p *Panel) Remove(name string, changed func(), say func(title, body string)) {
+	dir := p.dirNow()
 	go func() {
-		if err := p.fs.Remove(join(p.dir, name)); err != nil {
+		if err := p.fs.Remove(p.join(dir, name)); err != nil {
 			say(fmt.Sprintf("删除 %s 失败", name), err.Error())
 			if changed != nil {
 				changed()
 			}
 			return
 		}
-		p.Open(p.dir, changed)
+		p.Open(dir, changed)
 	}()
 }
+
+// join joins a directory with a name the way the panel's file system
+// does: the remote server's style, or this machine's.
+func (p *Panel) join(dir, name string) string { return p.fs.Join(dir, name) }
 
 // takeIn pulls an entry the other column sends into this one's
 // directory: files stream with progress, directories recurse.
 func (p *Panel) takeIn(srcPanel *Panel, name string, isDir bool) {
+	srcDir := srcPanel.dirNow()
+	dstDir := p.dirNow()
 	if isDir {
-		p.takeDir(srcPanel, name)
+		p.takeDir(srcPanel, name, srcDir, dstDir)
 		return
 	}
-	p.takeFile(srcPanel, name, join(srcPanel.dir, name), join(p.dir, name))
+	p.takeFile(srcPanel, name, srcPanel.join(srcDir, name), p.join(dstDir, name))
 }
 
 // takeFile streams one file from srcPanel's dir into this one's. It
 // waits for a free slot in the queue first, so drags beyond the
 // concurrency limit line up instead of racing.
 func (p *Panel) takeFile(srcPanel *Panel, name, src, dest string) {
-	srcPanel.Lock()
+	p.mu.Lock()
 	srcFS := srcPanel.fs
-	srcPanel.Unlock()
-	p.Lock()
+	p.dropFinishedLocked()
 	p.sendSeq++
 	id := p.sendSeq
 	p.sends[id] = &transfer{name: name, total: -1, queued: true}
 	changed := p.onChanged
-	p.Unlock()
+	p.mu.Unlock()
 	if changed != nil {
 		changed()
 	}
 	go func() {
 		p.queue <- struct{}{}        // 排队拿槽
 		defer func() { <-p.queue }() // 传完放出
-		p.Lock()
+		p.mu.Lock()
 		if t, ok := p.sends[id]; ok {
 			t.queued = false
 		}
-		p.Unlock()
+		p.mu.Unlock()
 		if changed != nil {
 			changed()
 		}
 		report := func(done, total int64) {
-			p.Lock()
+			p.mu.Lock()
 			if t, ok := p.sends[id]; ok {
 				t.done, t.total = done, total
 			}
-			p.Unlock()
+			p.mu.Unlock()
 			if changed != nil {
 				changed()
 			}
 		}
 		err := srcFS.Send(src, dest, p.fs, report)
-		p.Lock()
+		p.mu.Lock()
 		if t, ok := p.sends[id]; ok {
 			if err != nil {
 				t.err = err.Error()
@@ -364,111 +367,105 @@ func (p *Panel) takeFile(srcPanel *Panel, name, src, dest string) {
 				t.total = t.done
 			}
 		}
-		p.Unlock()
+		p.mu.Unlock()
 		if err != nil {
 			plistSay("传输失败", name+": "+err.Error())
 			p.kick()
 			return
 		}
-		p.Open(p.dir, changed)
+		p.Open(p.dirNow(), changed)
 	}()
 }
 
 // takeDir recurses a directory of the other column into this one: it
-// makes the dir here, then takes each child by its own kind. The top
-// dir's progress counts the files as they land.
-func (p *Panel) takeDir(srcPanel *Panel, name string) {
-	srcPanel.Lock()
-	srcFS, srcDir := srcPanel.fs, srcPanel.dir
-	srcPanel.Unlock()
-	dstDir := join(p.dir, name)
-	src := join(srcDir, name)
-	p.Lock()
+// makes the dir here, then takes each child by its own kind. The
+// transfer counts files, so the bar shows how many of them landed once
+// the whole tree is known.
+func (p *Panel) takeDir(srcPanel *Panel, name, srcDir, dstDir string) {
+	p.mu.Lock()
+	srcFS := srcPanel.fs
+	p.dropFinishedLocked()
 	p.sendSeq++
 	id := p.sendSeq
 	p.sends[id] = &transfer{name: name + "/", total: -1, queued: true}
 	changed := p.onChanged
-	p.Unlock()
+	p.mu.Unlock()
 	if changed != nil {
 		changed()
 	}
+	dir := p.join(dstDir, name)
+	src := p.join(srcDir, name)
 	go func() {
 		p.queue <- struct{}{}        // 整棵目录占一个槽
 		defer func() { <-p.queue }() // 传完放出
-		p.Lock()
+		p.mu.Lock()
 		if t, ok := p.sends[id]; ok {
 			t.queued = false
 		}
-		p.Unlock()
+		p.mu.Unlock()
 		if changed != nil {
 			changed()
 		}
 		// 先在目标建好目录,再一层层把子孙拉过来;任何一个失败
 		// 都记到整条传输上,能传多少传多少。
-		if err := p.fs.Mkdir(dstDir); err != nil {
-			plistSay("新建目录失败", dstDir+": "+err.Error())
+		if err := p.fs.Mkdir(dir); err != nil {
+			plistSay("新建目录失败", dir+": "+err.Error())
+			p.setSendErr(id, err.Error())
 			p.kick()
 			return
 		}
-		p.walkDir(srcPanel, srcFS, src, dstDir, id, changed)
-		p.Lock()
+		p.walkDir(srcFS, src, dir, id, changed)
+		p.mu.Lock()
 		if t, ok := p.sends[id]; ok && t.err == "" {
-			t.total = t.done // done 累计了文件数,total 跟着落地
+			t.total = t.done // done 数的是文件,total 跟着落地
 		}
-		p.Unlock()
-		p.Open(p.dir, changed)
+		p.mu.Unlock()
+		p.Open(p.dirNow(), changed)
 	}()
 }
 
 // walkDir copies the children of src (on srcFS) into dst (on p.fs),
 // counting each file into the transfer's done as it lands.
-func (p *Panel) walkDir(srcPanel *Panel, srcFS fileChan, src, dst string, id int, changed func()) {
+func (p *Panel) walkDir(srcFS fileChan, src, dst string, id int, changed func()) {
 	ents, err := srcFS.ReadDir(src)
 	if err != nil {
-		p.Lock()
-		if t, ok := p.sends[id]; ok {
-			t.err = err.Error()
-		}
-		p.Unlock()
+		p.setSendErr(id, err.Error())
 		return
 	}
 	for _, e := range ents {
-		subSrc := join(src, e.Name)
-		subDst := join(dst, e.Name)
+		subSrc := srcFS.Join(src, e.Name)
+		subDst := p.join(dst, e.Name)
 		if e.IsDir {
 			if err := p.fs.Mkdir(subDst); err != nil {
-				p.Lock()
-				if t, ok := p.sends[id]; ok {
-					t.err = e.Name + ": " + err.Error()
-				}
-				p.Unlock()
+				p.setSendErr(id, e.Name+": "+err.Error())
 				continue
 			}
-			p.walkDir(srcPanel, srcFS, subSrc, subDst, id, changed)
+			p.walkDir(srcFS, subSrc, subDst, id, changed)
 			continue
 		}
-		// 子文件复用 takeFile 的单条传输:名字记相对路径,不占新
-		// 条目;进度直接加进外层目录的 done。
-		err := srcFS.Send(subSrc, subDst, p.fs, func(done, total int64) {
-			p.Lock()
-			if t, ok := p.sends[id]; ok {
-				t.done++
-			}
-			p.Unlock()
-			if changed != nil {
-				changed()
-			}
-		})
-		p.Lock()
-		if t, ok := p.sends[id]; ok {
-			if err != nil {
-				t.err = e.Name + ": " + err.Error()
-			} else {
-				t.done++
-			}
+		// 子文件由源通道流进目标通道,进度只数落地的文件,不数块。
+		if err := srcFS.Send(subSrc, subDst, p.fs, nil); err != nil {
+			p.setSendErr(id, e.Name+": "+err.Error())
+			continue
 		}
-		p.Unlock()
+		p.mu.Lock()
+		if t, ok := p.sends[id]; ok {
+			t.done++
+		}
+		p.mu.Unlock()
+		if changed != nil {
+			changed()
+		}
 	}
+}
+
+// setSendErr records a failure on a transfer.
+func (p *Panel) setSendErr(id int, msg string) {
+	p.mu.Lock()
+	if t, ok := p.sends[id]; ok {
+		t.err = msg
+	}
+	p.mu.Unlock()
 }
 
 // takeDrop pulls a file dragged from the other column into this one's
@@ -480,14 +477,11 @@ func (p *Panel) takeDrop(e ui.Element) {
 	}
 }
 
-// join joins a directory with a name, remote-style.
-func join(dir, name string) string { return dir + "/" + name }
-
 // Close ends the file channel.
 func (p *Panel) Close() {
-	p.Lock()
+	p.mu.Lock()
 	fs := p.fs
-	p.Unlock()
+	p.mu.Unlock()
 	if fs != nil {
 		_ = fs.Close()
 	}

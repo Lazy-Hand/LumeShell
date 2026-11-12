@@ -14,7 +14,7 @@ import (
 // so one panel type serves both columns of the browser.
 type LocalFS struct{}
 
-// ReadDir lists a directory of this machine.
+// ReadDir lists a directory of this machine; the panel sorts it.
 func (LocalFS) ReadDir(dir string) ([]sshclient.Entry, error) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -27,14 +27,13 @@ func (LocalFS) ReadDir(dir string) ([]sshclient.Entry, error) {
 			continue // gone between listing and stat
 		}
 		out = append(out, sshclient.Entry{
-			Name:  e.Name(),
-			Size:  info.Size(),
-			Mode:  info.Mode(),
-			Moded: info.ModTime(),
-			IsDir: e.IsDir(),
+			Name:    e.Name(),
+			Size:    info.Size(),
+			Mode:    info.Mode(),
+			ModTime: info.ModTime(),
+			IsDir:   e.IsDir(),
 		})
 	}
-	sortEntries(out)
 	return out, nil
 }
 
@@ -42,16 +41,8 @@ func (LocalFS) Mkdir(dir string) error       { return os.Mkdir(dir, 0o755) }
 func (LocalFS) Remove(p string) error        { return os.Remove(p) }
 func (LocalFS) Rename(from, to string) error { return os.Rename(from, to) }
 
-// Download copies a local file to a local path: the panel's download
-// button over the local column stays but moves files, so beside itself
-// it copies.
-func (LocalFS) Download(src, dest string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dest, data, 0o644)
-}
+// Join joins a directory with a name this machine's way.
+func (LocalFS) Join(dir, name string) string { return filepath.Join(dir, name) }
 
 // Send copies this channel's local file at src to the destination
 // channel's remote path: the source reads from disk, the destination
@@ -72,7 +63,7 @@ func (LocalFS) Send(src, remote string, dst sshclient.WriterFor, report func(don
 	if err != nil {
 		return err
 	}
-	if st.Size() >= 8<<20 {
+	if st.Size() >= sshclient.ChunkThreshold {
 		if wa, ok := out.(io.WriterAt); ok {
 			err := sshclient.SendChunked(in, wa, st.Size(), report)
 			cerr := out.Close()
@@ -139,6 +130,3 @@ func sortEntries(es []sshclient.Entry) {
 		return es[i].Name < es[j].Name
 	})
 }
-
-// Base is the last part of a path, either file system's style.
-func Base(p string) string { return filepath.Base(p) }

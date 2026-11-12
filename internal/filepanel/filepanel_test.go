@@ -29,17 +29,18 @@ func (f *fakeFS) ReadDir(dir string) ([]sshclient.Entry, error) {
 			continue
 		}
 		out = append(out, sshclient.Entry{
-			Name:  e.Name(),
-			Size:  info.Size(),
-			Mode:  info.Mode(),
-			Moded: info.ModTime(),
-			IsDir: e.IsDir(),
+			Name:    e.Name(),
+			Size:    info.Size(),
+			Mode:    info.Mode(),
+			ModTime: info.ModTime(),
+			IsDir:   e.IsDir(),
 		})
 	}
 	return out, nil
 }
 
 func (f *fakeFS) Mkdir(dir string) error                     { return os.Mkdir(dir, 0o755) }
+func (f *fakeFS) Join(dir, name string) string               { return filepath.Join(dir, name) }
 func (f *fakeFS) Remove(p string) error                      { return os.Remove(p) }
 func (f *fakeFS) Rename(from, to string) error               { return os.Rename(from, to) }
 func (f *fakeFS) Create(path string) (io.WriteCloser, error) { return os.Create(path) }
@@ -253,5 +254,52 @@ func TestErrorsReachThePanel(t *testing.T) {
 	}
 	if len(p.Entries()) != 0 {
 		t.Fatal("entries from a failed listing")
+	}
+}
+
+// delayedFS slows one directory's listing, so an older Open can land
+// after a newer one.
+type delayedFS struct {
+	*fakeFS
+	slow string
+	wait time.Duration
+}
+
+func (f *delayedFS) ReadDir(dir string) ([]sshclient.Entry, error) {
+	if dir == f.slow {
+		time.Sleep(f.wait)
+	}
+	return f.fakeFS.ReadDir(dir)
+}
+
+func TestStaleListingDoesNotWin(t *testing.T) {
+	// 慢目录的列表比后点的目录晚回来时,不能把面板翻回去。
+	home := t.TempDir()
+	for _, d := range []string{"slow", "fast"} {
+		if err := os.Mkdir(filepath.Join(home, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "fast", "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs := &delayedFS{fakeFS: &fakeFS{root: home}, slow: filepath.Join(home, "slow"), wait: 150 * time.Millisecond}
+	p := New(fs, home)
+	changed := make(chan struct{}, 8)
+	p.Open(filepath.Join(home, "slow"), func() { changed <- struct{}{} })
+	p.Open(filepath.Join(home, "fast"), func() { changed <- struct{}{} })
+	waitChanged(t, changed)
+	if p.Dir() != filepath.Join(home, "fast") {
+		t.Fatalf("dir = %q", p.Dir())
+	}
+	select {
+	case <-changed: // the slow listing came back and was dropped
+	case <-time.After(500 * time.Millisecond):
+	}
+	if p.Dir() != filepath.Join(home, "fast") {
+		t.Fatalf("a stale listing moved the panel to %q", p.Dir())
+	}
+	if ents := p.Entries(); len(ents) != 1 || ents[0].Name != "f.txt" {
+		t.Fatalf("entries = %+v, want fast's", ents)
 	}
 }

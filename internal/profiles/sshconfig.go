@@ -20,8 +20,10 @@ type SSHConfigHost struct {
 }
 
 // ReadSSHConfig parses path's Host blocks. Wildcard and negated
-// patterns (Host *, Host !x) are skipped — they set defaults, not
-// connectable entries. A missing file is an empty list, not an error.
+// patterns (Host *, Host !x) are skipped as entries — they set defaults,
+// not connectable hosts — and what a Host * block sets (User, Port,
+// IdentityFile) is applied to the hosts missing it, as ssh does. A
+// missing file is an empty list, not an error.
 func ReadSSHConfig(path string) []SSHConfigHost {
 	f, err := os.Open(path)
 	if err != nil {
@@ -30,12 +32,16 @@ func ReadSSHConfig(path string) []SSHConfigHost {
 	defer f.Close()
 
 	var out []SSHConfigHost
-	var cur *SSHConfigHost
+	var defaults SSHConfigHost // what the wildcard blocks set
+	var cur *SSHConfigHost     // the host being read, nil outside one
+	block := func() *SSHConfigHost {
+		if cur != nil {
+			return cur
+		}
+		return &defaults
+	}
 	flush := func() {
 		if cur != nil && cur.Alias != "" {
-			if cur.HostName == "" {
-				cur.HostName = cur.Alias
-			}
 			out = append(out, *cur)
 		}
 		cur = nil
@@ -53,7 +59,8 @@ func ReadSSHConfig(path string) []SSHConfigHost {
 		switch strings.ToLower(key) {
 		case "host":
 			flush()
-			// 一行可以有多个 pattern;只收第一个具体的。
+			// 一行可以有多个 pattern;只收第一个具体的,全是通配就是
+			// 一段默认值。
 			for _, pat := range strings.Fields(val) {
 				if strings.ContainsAny(pat, "*?!") {
 					continue
@@ -62,24 +69,33 @@ func ReadSSHConfig(path string) []SSHConfigHost {
 				break
 			}
 		case "hostname":
-			if cur != nil {
-				cur.HostName = val
-			}
+			block().HostName = val
 		case "port":
-			if cur != nil {
-				cur.Port = val
-			}
+			block().Port = val
 		case "user":
-			if cur != nil {
-				cur.User = val
-			}
+			block().User = val
 		case "identityfile":
-			if cur != nil && cur.Identity == "" { // 只用第一把
-				cur.Identity = expandTilde(val)
+			if b := block(); b.Identity == "" { // 只用第一把
+				b.Identity = expandTilde(val)
 			}
 		}
 	}
 	flush()
+	for i := range out {
+		h := &out[i]
+		if h.HostName == "" {
+			h.HostName = h.Alias
+		}
+		if h.User == "" {
+			h.User = defaults.User
+		}
+		if h.Port == "" {
+			h.Port = defaults.Port
+		}
+		if h.Identity == "" {
+			h.Identity = defaults.Identity
+		}
+	}
 	return out
 }
 

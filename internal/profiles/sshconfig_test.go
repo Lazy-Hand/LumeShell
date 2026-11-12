@@ -73,3 +73,37 @@ func TestSplitKV(t *testing.T) {
 		}
 	}
 }
+
+func TestSSHConfigWildcardDefaults(t *testing.T) {
+	// Host * 里的 User/Port/IdentityFile 是默认值,像 ssh 那样落到
+	// 没写这几项的主机上。
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config")
+	cfg := `
+Host *
+    User shared
+    Port 2200
+    IdentityFile /keys/default
+
+Host app
+    HostName app.example.com
+
+Host db
+    HostName db.example.com
+    User dbadmin
+`
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := ReadSSHConfig(path)
+	if len(got) != 2 {
+		t.Fatalf("want 2 hosts, got %+v", got)
+	}
+	app, db := got[0], got[1]
+	if app.User != "shared" || app.Port != "2200" || app.Identity != "/keys/default" {
+		t.Fatalf("app took no defaults: %+v", app)
+	}
+	if db.User != "dbadmin" || db.Port != "2200" {
+		t.Fatalf("db lost its own user or the default port: %+v", db)
+	}
+}
